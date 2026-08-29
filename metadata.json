@@ -1,0 +1,11 @@
+{
+  "name": "Guardian",
+  "description": "A community safety and emergency assistance application with AI safety advisor, live incident feed, SOS emergency alerts, and trusted contacts.",
+  "requestFramePermissions": [
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.CALL_PHONE",
+    "android.permission.SEND_SMS"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
