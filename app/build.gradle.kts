@@ -1,49 +1,92 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
-  alias(libs.plugins.secrets)
 }
 
+/**
+ * Production configuration values are never committed.
+ *
+ * Resolution order: environment variable, then `local.properties` (git ignored),
+ * then an empty default. An empty value means "not configured": the build still
+ * succeeds and the app fails safe at runtime (no fabricated endpoint, key or id).
+ */
+val localProperties = Properties().apply {
+  val file = rootProject.file("local.properties")
+  if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun configurationValue(name: String): String =
+  (System.getenv(name) ?: localProperties.getProperty(name) ?: "").trim()
+
+val cloudflareWorkerUrl = configurationValue("CLOUDFLARE_WORKER_URL")
+val revenueCatAndroidApiKey = configurationValue("REVENUECAT_ANDROID_API_KEY")
+val revenueCatEntitlementId = configurationValue("REVENUECAT_ENTITLEMENT_ID")
+
+val keystorePath = configurationValue("KEYSTORE_PATH")
+val storePasswordValue = configurationValue("STORE_PASSWORD")
+val keyAliasValue = configurationValue("KEY_ALIAS")
+val keyPasswordValue = configurationValue("KEY_PASSWORD")
+val keystoreFile = keystorePath.takeIf { it.isNotEmpty() }?.let { file(it) }
+val hasReleaseSigning = keystoreFile != null && keystoreFile.exists() &&
+  storePasswordValue.isNotEmpty() && keyAliasValue.isNotEmpty() && keyPasswordValue.isNotEmpty()
+
 android {
-  namespace = "com.example"
+  namespace = "com.guardian.safety"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.guardian.sftypr"
+    applicationId = "com.guardian.safety"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Public configuration only. Secrets (Cloudflare API tokens, AUTH_SECRET,
+    // RevenueCat secret keys) are never embedded in the APK.
+    buildConfigField("String", "CLOUDFLARE_WORKER_URL", "\"$cloudflareWorkerUrl\"")
+    buildConfigField("String", "REVENUECAT_ANDROID_API_KEY", "\"$revenueCatAndroidApiKey\"")
+    buildConfigField("String", "REVENUECAT_ENTITLEMENT_ID", "\"$revenueCatEntitlementId\"")
+    buildConfigField("String", "EVIDENCE_MIME_ALLOWLIST", "\"image/jpeg,image/png,image/webp,audio/mp4,audio/mpeg,application/pdf,text/plain,application/json\"")
+    buildConfigField("int", "EVIDENCE_MAX_BYTES", "5242880")
   }
 
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
-    }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+    if (hasReleaseSigning) {
+      create("release") {
+        storeFile = keystoreFile
+        storePassword = storePasswordValue
+        keyAlias = keyAliasValue
+        keyPassword = keyPasswordValue
+      }
     }
   }
 
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      if (hasReleaseSigning) {
+        signingConfig = signingConfigs.getByName("release")
+      } else {
+        logger.warn(
+          "Guardian: release signing is not configured (KEYSTORE_PATH/STORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD). " +
+            "assembleRelease will produce an UNSIGNED artifact that cannot be published."
+        )
+      }
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      // Uses the standard Android debug keystore managed by the Android Gradle
+      // Plugin. Never used for a production artifact.
+      isMinifyEnabled = false
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -53,27 +96,31 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  packaging {
+    resources {
+      excludes += setOf(
+        "/META-INF/AL2.0",
+        "/META-INF/LGPL2.1",
+        "/META-INF/DEPENDENCIES",
+        "/META-INF/INDEX.LIST",
+        "/META-INF/LICENSE*",
+        "/META-INF/NOTICE*",
+        "META-INF/*.kotlin_module",
+      )
+    }
+  }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      isReturnDefaultValues = true
+    }
+  }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-}
-
-// Some unused dependencies are commented out below instead of being removed.
-// This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
   implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
-  // implementation(libs.androidx.camera.camera2)
-  // implementation(libs.androidx.camera.core)
-  // implementation(libs.androidx.camera.lifecycle)
-  // implementation(libs.androidx.camera.view)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
@@ -81,32 +128,19 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
-  implementation("androidx.work:work-runtime-ktx:2.9.0")
-  implementation("androidx.security:security-crypto:1.1.0-alpha06")
-  implementation("androidx.biometric:biometric:1.2.0-alpha05")
-  implementation("net.zetetic:android-database-sqlcipher:4.5.4")
-  implementation("androidx.sqlite:sqlite:2.4.0")
+  implementation(libs.androidx.work.runtime.ktx)
+  implementation(libs.androidx.security.crypto)
+  implementation(libs.androidx.biometric)
+  implementation(libs.sqlcipher.android)
+  implementation(libs.androidx.sqlite)
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
-  // Uncomment to use Firestore:
-  // implementation(libs.firebase.firestore)
-
-  // Firebase Auth with Google Sign-In requires all of the following to be uncommented together.
-  // If you are using Firebase Auth with other providers (e.g. Email/Password), you may only need
-  // firebase-auth.
-  implementation(libs.firebase.auth)
-  implementation(libs.androidx.credentials)
-  implementation(libs.androidx.credentials.play.services)
-  implementation(libs.googleid)
-  implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.database)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
@@ -114,22 +148,30 @@ dependencies {
   implementation(libs.okhttp)
   implementation(libs.play.services.location)
   implementation(libs.retrofit)
+  // Subscriptions. Only the public SDK key is embedded; the entitlement id is
+  // configuration, never a secret.
+  implementation(libs.revenuecat.purchases)
+
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
+  testImplementation(libs.okhttp)
   testImplementation(libs.robolectric)
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)
+
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
+
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
+
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }

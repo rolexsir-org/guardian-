@@ -14,5 +14,29 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Environment / secrets — never commit real values.
 .env
+.env.local
+.env.*.local
+dev.vars
+.dev.vars
+.wrangler/
+
+# Signing material
+*.jks
+*.keystore
+keystore.properties
+my-upload-key.jks
 debug.keystore
+
+# Cloudflare backend build output and local state
+cloudflare/dist/
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/coverage/
+
+# Legacy Google services configuration (the Cloudflare migration no longer needs it).
+# Keep ignored so a stale file is never committed again.
+google-services.json
+app/google-services.json
