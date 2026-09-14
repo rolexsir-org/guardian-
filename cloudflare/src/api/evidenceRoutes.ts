@@ -1,5 +1,5 @@
 /**
- * Evidence (R2) endpoints. Firebase Storage was never used by Guardian, so R2
+ * Evidence (R2) endpoints. Object storage was never part of the previous backend, so R2
  * is wired only for the emergency evidence vault: authenticated upload, owner
  * (or family, for SOS-linked files) download, deletion and retention purge.
  * The bucket is never public.

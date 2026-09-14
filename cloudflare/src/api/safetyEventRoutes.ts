@@ -1,7 +1,7 @@
 /**
  * Community safety events (hazards + incidents).
  *
- * Replaces the Firebase Realtime Database `safety_incidents` tree. Reads are
+ * Replaces the legacy realtime-database `safety_incidents` tree. Reads are
  * relational and radius filtered; writes are authenticated, validated and rate
  * limited. Upvotes are idempotent per user.
  */

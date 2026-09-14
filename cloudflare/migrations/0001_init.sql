@@ -2,12 +2,12 @@
 -- Guardian Cloudflare backend — initial relational schema
 -- ============================================================================
 -- Design notes:
---  * Firebase Realtime Database was a JSON tree (contact_status/*,
+--  * The legacy realtime database was a JSON tree (contact_status/*,
 --    safety_incidents/*, sos_events/*). The Cloudflare schema is relational:
 --    explicit primary keys, foreign keys, indexes and CHECK constraints.
 --  * Sensitive data minimisation: no medical records, no raw IP addresses and
 --    no plaintext credentials/refresh tokens are stored. Medical profile data
---    intentionally remains on-device (it was never synced to Firebase either).
+--    intentionally remains on-device (it was never synced to the cloud either).
 --  * All timestamps are epoch milliseconds (INTEGER) in UTC.
 --  * Ids are application generated UUID v4 (TEXT).
 -- ============================================================================
@@ -140,7 +140,7 @@ CREATE TABLE family_invites (
 CREATE UNIQUE INDEX idx_family_invites_code ON family_invites (code_hash);
 CREATE INDEX idx_family_invites_group ON family_invites (group_id, consumed_at);
 
--- Presence replaces Firebase `.info/connected` + `onDisconnect`.
+-- Presence replaces the legacy connection listener + disconnect hooks.
 CREATE TABLE presence (
   user_id      TEXT    PRIMARY KEY NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   status       TEXT    NOT NULL,
@@ -153,7 +153,7 @@ CREATE TABLE presence (
 
 CREATE INDEX idx_presence_last_seen ON presence (last_seen_at);
 
--- Community safety reports: replaces Firebase RTDB `safety_incidents`.
+-- Community safety reports: replaces the legacy `safety_incidents` tree.
 CREATE TABLE safety_events (
   id               TEXT    PRIMARY KEY NOT NULL,
   kind             TEXT    NOT NULL,
@@ -191,7 +191,7 @@ CREATE TABLE safety_event_votes (
   PRIMARY KEY (event_id, user_id)
 ) STRICT;
 
--- Replaces Firebase RTDB `sos_events`. (user_id, client_event_id) is unique so
+-- Replaces the legacy `sos_events` tree. (user_id, client_event_id) is unique so
 -- an offline device can safely replay an SOS without creating duplicates.
 CREATE TABLE sos_events (
   id               TEXT    PRIMARY KEY NOT NULL,

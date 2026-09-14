@@ -1,21 +1,71 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# Guardian release (R8) rules.
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Only keep what reflection-based libraries genuinely need. Model classes carry
+# Moshi's generated adapters, so the adapters (not the models) are what must
+# survive shrinking.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ---------------------------------------------------------------------------
+# Kotlin / coroutines
+# ---------------------------------------------------------------------------
+-dontwarn kotlinx.coroutines.**
+-keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ---------------------------------------------------------------------------
+# Moshi (JSON): keep generated adapters and the annotated models they serve.
+# ---------------------------------------------------------------------------
+-keep class **JsonAdapter { *; }
+-keepclasseswithmembers class * {
+    @com.squareup.moshi.* <methods>;
+}
+-keep @com.squareup.moshi.JsonQualifier interface *
+-keepclassmembers class * {
+    @com.squareup.moshi.Json <fields>;
+}
+-keep class com.guardian.safety.remote.model.** { <init>(...); <fields>; }
+-keep,allowobfuscation,allowshrinking @com.squareup.moshi.JsonClass class *
+-dontwarn okio.**
+-dontwarn javax.annotation.**
+-dontwarn org.jetbrains.annotations.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ---------------------------------------------------------------------------
+# Retrofit / OkHttp
+# ---------------------------------------------------------------------------
+-dontwarn retrofit2.**
+-keep,allowobfuscation,allowshrinking interface retrofit2.Call
+-keep,allowobfuscation,allowshrinking class retrofit2.Response
+-keepattributes Signature, InnerClasses, EnclosingMethod
+-keepattributes RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations
+-keepattributes *Annotation*
+-keepclassmembers,allowshrinking,allowobfuscation interface * {
+    @retrofit2.http.* <methods>;
+}
+-dontwarn okhttp3.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+
+# ---------------------------------------------------------------------------
+# Room + SQLCipher
+# ---------------------------------------------------------------------------
+-keep class androidx.room.** { *; }
+-keep @androidx.room.Entity class * { *; }
+-dontwarn androidx.room.paging.**
+-keep class net.sqlcipher.** { *; }
+-dontwarn net.sqlcipher.**
+
+# ---------------------------------------------------------------------------
+# RevenueCat (subscriptions)
+# ---------------------------------------------------------------------------
+-keep class com.revenuecat.purchases.** { *; }
+-dontwarn com.revenuecat.purchases.**
+
+# ---------------------------------------------------------------------------
+# Android components declared in the manifest
+# ---------------------------------------------------------------------------
+-keep class com.guardian.safety.GuardianApplication { *; }
+-keep class com.guardian.safety.MainActivity { *; }
+-keep class com.guardian.safety.worker.** { *; }
+
+# Keep source information for readable production stack traces.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

@@ -36,7 +36,7 @@ cloudflare/node_modules/
 cloudflare/.wrangler/
 cloudflare/coverage/
 
-# Firebase configuration (removed as part of the Cloudflare migration).
+# Legacy Google services configuration (the Cloudflare migration no longer needs it).
 # Keep ignored so a stale file is never committed again.
 google-services.json
 app/google-services.json

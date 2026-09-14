@@ -10,7 +10,7 @@
  *   * WebSocket fan-out (no polling).
  *   * Durable, sequenced event buffer so a client that reconnects can replay
  *     what it missed (`sync`) or fall back to a full snapshot (`sync.gap`).
- *   * Presence tracking with automatic expiry (replaces Firebase
+ *   * Presence tracking with automatic expiry (replaces the legacy
  *     `.info/connected` + `onDisconnect`).
  *   * Active-SOS state that survives DO eviction, so an interrupted connection
  *     can never lose an emergency.
