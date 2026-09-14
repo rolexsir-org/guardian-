@@ -23,6 +23,13 @@
          and the permission is requested only when the user switches it on. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Device-credential / biometric confirmation for protected screens.
+         USE_FINGERPRINT covers API 24-27, USE_BIOMETRIC covers API 28+. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission
+        android:name="android.permission.USE_FINGERPRINT"
+        tools:targetApi="23" />
+
     <uses-feature
         android:name="android.hardware.telephony"
         android:required="false" />

@@ -2,7 +2,6 @@ package com.guardian.safety
 
 import android.app.Application
 import android.content.Context
-import android.util.Log
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -15,6 +14,7 @@ import com.guardian.safety.remote.AuthRepository
 import com.guardian.safety.remote.CloudArtifactRepository
 import com.guardian.safety.remote.CloudConfig
 import com.guardian.safety.remote.CloudRepository
+import com.guardian.safety.remote.RealtimeClient
 import com.guardian.safety.service.LocationService
 import com.guardian.safety.service.LocationSyncCoordinator
 import com.guardian.safety.service.SecureEncryptedPreferences
@@ -22,99 +22,29 @@ import com.guardian.safety.service.SessionManager
 import com.guardian.safety.service.SosEmergencyManager
 import com.guardian.safety.service.TokenManager
 import com.guardian.safety.service.UserPresenceService
+import com.guardian.safety.worker.CleanupWorker
 import com.guardian.safety.worker.RiskAreaGeofenceWorker
+import com.guardian.safety.worker.SosSyncWorker
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import java.util.concurrent.TimeUnit
 
 /**
- * Process-wide dependency graph.
+ * Application entry point and dependency container.
  *
- * The app has no third-party realtime database, no bootstrap credentials and no hidden fallback backend:
- * every dependency here is either local (encrypted storage, Room/SQLCipher) or the
- * single Guardian Worker configured through [CloudConfig].
+ * Everything the app needs is constructed here exactly once and injected into the
+ * ViewModel: encrypted preferences, the token store, the SQLCipher database, the
+ * authenticated Guardian API client, the emergency managers and the background
+ * workers. There is no hidden global state, no bootstrap credential and no
+ * fallback backend.
+ *
+ * If the cloud backend is not configured for this build the app still starts: the
+ * container reports why, screens surface it, and everything that works without a
+ * network (emergency call, emergency SMS, local records, local check-ins) keeps
+ * working.
  */
-class AppContainer(val application: Application) {
-
-    val applicationScope = CoroutineScope(SupervisorJob())
-
-    val securePreferences: SecureEncryptedPreferences = SecureEncryptedPreferences.getInstance(application)
-
-    val tokenManager: TokenManager = TokenManager(securePreferences)
-
-    val database: GuardianDatabase by lazy { GuardianDatabase.getDatabase(application) }
-
-    val apiClient: ApiClient by lazy {
-        ApiClient(tokenManager) {
-            // The server rejected our credentials: reflect it in the session state.
-            applicationScope.launch { sessionManager.onSessionInvalidated(null) }
-        }
-    }
-
-    val authRepository: AuthRepository by lazy { AuthRepository(apiClient, securePreferences) }
-
-    val cloudRepository: CloudRepository by lazy { CloudRepository(apiClient) }
-
-    val artifactRepository: CloudArtifactRepository by lazy { CloudArtifactRepository(apiClient) }
-
-    val repository: GuardianRepository by lazy {
-        GuardianRepository(
-            context = application,
-            guardianDao = database.guardianDao(),
-            cloudRepository = cloudRepository,
-            artifactRepository = artifactRepository,
-        )
-    }
-
-    val sessionManager: SessionManager by lazy {
-        SessionManager(application, tokenManager, authRepository, securePreferences)
-    }
-
-    val sosEmergencyManager: SosEmergencyManager by lazy {
-        SosEmergencyManager(application, repository, sessionManager)
-    }
-
-    val locationService: LocationService by lazy { LocationService(application) }
-
-    val locationSyncCoordinator: LocationSyncCoordinator by lazy {
-        LocationSyncCoordinator(repository)
-    }
-
-    val userPresenceService: UserPresenceService by lazy {
-        UserPresenceService(repository, applicationScope)
-    }
-
-    /** True when this build has a real Worker URL; the UI must say so when it does not. */
-    val isCloudConfigured: Boolean get() = CloudConfig.configured
-
-    val configurationError: String? get() = CloudConfig.configurationError
-
-    /** Only scheduled when a backend is configured and the user is signed in. */
-    fun scheduleBackgroundWork() {
-        if (!isCloudConfigured) {
-            Log.i(TAG, "Background workers not scheduled: ${CloudConfig.configurationError}")
-            return
-        }
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-        val riskAreaWork = PeriodicWorkRequestBuilder<RiskAreaGeofenceWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(constraints)
-            .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        WorkManager.getInstance(application).enqueueUniquePeriodicWork(
-            RiskAreaGeofenceWorker.UNIQUE_WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
-            riskAreaWork,
-        )
-    }
-
-    private companion object {
-        const val TAG = "GuardianApplication"
-    }
-}
-
 class GuardianApplication : Application() {
 
     lateinit var container: AppContainer
@@ -123,19 +53,135 @@ class GuardianApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
-        // A failing encrypted store or database must not crash the emergency UI:
-        // the failure is recorded and surfaced to the user instead.
-        runCatching { container.database }
-            .onFailure { error ->
-                Log.e(TAG, "Encrypted database could not be opened", error)
-            }
-        container.scheduleBackgroundWork()
+    }
+}
+
+/** Long-lived dependencies, created once per process. */
+class AppContainer(val application: Application) {
+
+    private val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val securePreferences: SecureEncryptedPreferences =
+        SecureEncryptedPreferences.getInstance(application)
+
+    val tokenManager: TokenManager = TokenManager(application)
+
+    val database: GuardianDatabase = GuardianDatabase.getInstance(application)
+
+    /**
+     * The authenticated HTTP client. When the server rejects a refresh token the
+     * session manager is told, so the UI can return to the sign-in screen instead
+     * of pretending the user is still signed in.
+     */
+    val apiClient: ApiClient = ApiClient(tokenManager) { reason ->
+        sessionManager.onSessionInvalidated(reason)
+    }
+
+    val authRepository: AuthRepository = AuthRepository(apiClient, securePreferences)
+
+    val sessionManager: SessionManager = SessionManager(
+        context = application,
+        tokenManager = tokenManager,
+        authRepository = authRepository,
+        securePrefs = securePreferences,
+    )
+
+    val cloudRepository: CloudRepository = CloudRepository(apiClient)
+
+    val artifactRepository: CloudArtifactRepository = CloudArtifactRepository(apiClient)
+
+    val repository: GuardianRepository = GuardianRepository(
+        context = application,
+        guardianDao = database.guardianDao(),
+        cloudRepository = cloudRepository,
+        artifactRepository = artifactRepository,
+    )
+
+    val sosEmergencyManager: SosEmergencyManager = SosEmergencyManager(
+        context = application,
+        repository = repository,
+        sessionManager = sessionManager,
+    )
+
+    val locationService: LocationService = LocationService(application)
+
+    val locationSyncCoordinator: LocationSyncCoordinator = LocationSyncCoordinator(repository)
+
+    val userPresenceService: UserPresenceService = UserPresenceService(
+        repository = repository,
+        scope = appScope,
+    )
+
+    val realtimeClient: RealtimeClient = RealtimeClient(
+        tokenManager = tokenManager,
+        apiClient = apiClient,
+        scope = appScope,
+    )
+
+    /** True when this build points at a real Guardian deployment. */
+    val isCloudConfigured: Boolean = CloudConfig.configured
+
+    /** Human readable explanation when [isCloudConfigured] is false. */
+    val configurationError: String? = CloudConfig.configurationError
+
+    /** Non-null when encrypted storage could not be opened on this device. */
+    val secureStorageError: String? = SecureEncryptedPreferences.storageError.value
+
+    val databaseRecoveryNotice: String? = GuardianDatabase.recoveryNotice
+
+    init {
+        if (isCloudConfigured) scheduleBackgroundWork()
+    }
+
+    /**
+     * Registers periodic work that keeps local data in step with the server.
+     *
+     * Work is only scheduled for configured builds: a build with no backend URL has
+     * nothing to talk to and must not enqueue jobs that can only fail. Emergency
+     * syncing is also scheduled on demand (see [SosEmergencyManager.trigger]), so a
+     * lost connection never depends on the periodic window.
+     */
+    fun scheduleBackgroundWork() {
+        if (!isCloudConfigured) return
+        val workManager = WorkManager.getInstance(application)
+        val networkRequired = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        workManager.enqueueUniquePeriodicWork(
+            SosSyncWorker.UNIQUE_WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<SosSyncWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(networkRequired)
+                .build(),
+        )
+
+        workManager.enqueueUniquePeriodicWork(
+            RiskAreaGeofenceWorker.UNIQUE_WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<RiskAreaGeofenceWorker>(30, TimeUnit.MINUTES)
+                .setConstraints(networkRequired)
+                .build(),
+        )
+
+        workManager.enqueueUniquePeriodicWork(
+            CleanupWorker.UNIQUE_WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<CleanupWorker>(1, TimeUnit.DAYS).build(),
+        )
     }
 
     companion object {
-        private const val TAG = "GuardianApplication"
-
-        fun containerFrom(context: Context): AppContainer? =
-            (context.applicationContext as? GuardianApplication)?.container
+        /**
+         * Returns the process-wide container. Falls back to a fresh instance when
+         * the application class was replaced (for example in tests), so callers
+         * never receive null.
+         */
+        fun from(context: Context): AppContainer {
+            val appContext = context.applicationContext as Application
+            val app = appContext as? GuardianApplication
+            val existing = app?.let { runCatching { it.container }.getOrNull() }
+            return existing ?: AppContainer(appContext)
+        }
     }
 }

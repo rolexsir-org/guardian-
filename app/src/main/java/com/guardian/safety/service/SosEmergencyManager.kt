@@ -1,20 +1,15 @@
 package com.guardian.safety.service
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.location.Location
-import android.os.BatteryManager
-import android.os.Build
-import android.telephony.TelephonyManager
 import android.util.Log
-import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.guardian.safety.data.AuditLogEntity
 import com.guardian.safety.data.GuardianRepository
 import com.guardian.safety.data.SosQueueEntity
 import com.guardian.safety.remote.ApiResult
@@ -22,48 +17,77 @@ import com.guardian.safety.worker.SosSyncWorker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/** Stage of the emergency, mirroring the states the UI and audit log report. */
-enum class SosStage { TRIGGERED, CALL_STARTED, SMS_STARTED, CLOUD_SYNCED, FAILED, CANCELLED }
+/** Where an emergency currently stands. */
+enum class SosStage {
+    /** Recorded locally and the device actions have been dispatched. */
+    TRIGGERED,
 
-/** What the safety-critical trigger actually managed to do. */
-data class SosTriggerResult(
+    /** The emergency call was handed to the telephony stack. */
+    CALL_STARTED,
+
+    /** Emergency SMS messages were handed to the telephony stack. */
+    SMS_STARTED,
+
+    /** The server accepted the event and the queue row is marked SYNCED. */
+    CLOUD_SYNCED,
+
+    /** Nothing could be dispatched, or the emergency was cancelled. */
+    FAILED,
+
+    /** The user cancelled the alert. */
+    CANCELLED,
+}
+
+/** Everything the UI needs to describe an emergency honestly. */
+data class SosStatus(
     val clientEventId: String,
     val stage: SosStage,
+    val remoteId: String? = null,
+    val triggerSource: String,
+    val startedAt: Long,
     val callTarget: String? = null,
     val callOutcome: EmergencyActionResult? = null,
     val smsDeliveries: List<SmsDelivery> = emptyList(),
+    val locationShared: Boolean = false,
     val locationAvailable: Boolean = false,
     val cloudQueued: Boolean = false,
     val cloudSynced: Boolean = false,
-    /** Everything that did not work, stated plainly for the user. */
+    val cloudError: String? = null,
     val problems: List<String> = emptyList(),
-)
+    val cancelledAt: Long? = null,
+) {
+    val isActive: Boolean
+        get() = stage != SosStage.CANCELLED && stage != SosStage.FAILED
 
-/** Live emergency state observed by the UI. */
-data class SosActiveState(
-    val clientEventId: String,
-    val triggerSource: String,
-    val startedAt: Long,
-    val stage: SosStage,
-    val syncStatus: String,
-    val remoteId: String? = null,
-    val acknowledgedAt: Long? = null,
-    val lastError: String? = null,
-)
+    /** Short, user-facing summary used by the emergency screen. */
+    fun summary(): String = when (stage) {
+        SosStage.TRIGGERED -> "Emergency recorded on this device."
+        SosStage.CALL_STARTED -> "Emergency call placed."
+        SosStage.SMS_STARTED -> "Alert messages sent to your contacts."
+        SosStage.CLOUD_SYNCED -> "Alert received by Guardian and your family."
+        SosStage.CANCELLED -> "Alert cancelled on this device."
+        SosStage.FAILED -> "Emergency could not be completed. Check permissions and try again."
+    }
+}
 
 /**
- * Orchestrates a Guardian emergency.
+ * Orchestrates the safety-critical emergency path.
  *
- * Order of operations is deliberate:
- * 1. The emergency is recorded locally first (Room), so nothing is lost if the
- *    device dies or the network is down.
- * 2. The local actions Android can perform — call, SMS — fire immediately and
- *    independently of any network. Their real outcomes are captured.
- * 3. Cloud synchronisation is queued through WorkManager with the same
- *    `clientEventId`, so retries are idempotent and can never create a second
- *    emergency. `CLOUD_SYNCED` is reached only when the Worker accepted the event.
+ * Order of operations, and the reason for it:
+ *
+ * 1. The emergency is written to the local queue *first*. If the process dies
+ *    mid-emergency, the record and its `clientEventId` survive.
+ * 2. The device actions run immediately — an emergency call and SMS messages go
+ *    through Android's telephony stack. These never wait for, and never depend on,
+ *    the cloud. When Android refuses an action (permission missing, no telephony)
+ *    the outcome is recorded as a problem and surfaced in the UI; it is never
+ *    reported as success.
+ * 3. Cloud sync is queued as background work and attempted right away. A row only
+ *    becomes `SYNCED` when the server accepted it, and the `clientEventId` makes
+ *    that upload idempotent, so a retry can never create a duplicate emergency.
  */
 class SosEmergencyManager(
     private val context: Context,
@@ -71,367 +95,317 @@ class SosEmergencyManager(
     private val sessionManager: SessionManager,
 ) {
 
-    private val _active = MutableStateFlow<SosActiveState?>(null)
-    val active: StateFlow<SosActiveState?> = _active.asStateFlow()
+    private val _status = MutableStateFlow<SosStatus?>(null)
+    val status: StateFlow<SosStatus?> = _status.asStateFlow()
 
     /**
-     * Triggers an emergency.
-     *
-     * @param location the device's real fix, or null when location is unavailable.
-     *   No coordinates are ever invented.
+     * Fires an emergency. [location] is the real device fix when one is available;
+     * when it is null the alert still goes out and the UI says the location was
+     * unavailable instead of inventing coordinates.
      */
     suspend fun trigger(
         triggerSource: String,
         location: Location?,
-        userId: String? = sessionManager.currentSession()?.userId,
-        displayName: String? = sessionManager.currentSession()?.displayName,
-    ): SosTriggerResult {
-        val clientEventId = repository.newClientEventId()
-        val now = System.currentTimeMillis()
+        batteryLevel: Int?,
+        networkStatus: String?,
+        deviceInfo: String?,
+        contactPhoneNumbers: List<String>,
+        shareLocationWithFamily: Boolean = true,
+    ): SosStatus {
+        val clientEventId = UUID.randomUUID().toString()
+        val startedAt = System.currentTimeMillis()
         val problems = mutableListOf<String>()
 
-        val batteryLevel = batteryLevel()
-        val networkStatus = networkStatus()
-        val deviceInfo = deviceInfo()
+        val queued = SosQueueEntity(
+            clientEventId = clientEventId,
+            latitude = location?.latitude,
+            longitude = location?.longitude,
+            accuracyM = location?.accuracy,
+            batteryLevel = batteryLevel,
+            triggerSource = triggerSource,
+            syncStatus = UNVERIFIED_SYNC_STATUS,
+            createdAt = startedAt,
+            lastAttemptAt = null,
+            lastError = null,
+        )
 
-        // 1. Durable local record first: the emergency exists even offline.
-        val queueId = repository.insertSosQueue(
-            SosQueueEntity(
+        // 1. Local record first: the emergency exists on the device even if
+        //    everything after this line fails.
+        val rowId = try {
+            repository.insertSosQueue(queued)
+        } catch (error: Exception) {
+            Log.e(TAG, "Emergency queue write failed")
+            val failed = SosStatus(
                 clientEventId = clientEventId,
-                userId = userId,
-                timestamp = now,
-                latitude = location?.latitude,
-                longitude = location?.longitude,
-                accuracyM = location?.accuracy?.toDouble(),
-                batteryLevel = batteryLevel,
-                networkStatus = networkStatus,
-                deviceInfo = deviceInfo,
+                stage = SosStage.FAILED,
                 triggerSource = triggerSource,
-                emergencyStatus = "ACTIVE",
-                syncStatus = "PENDING",
+                startedAt = startedAt,
+                locationAvailable = location != null,
+                problems = listOf("This device could not save the emergency locally: ${error.message ?: "storage error"}."),
+            )
+            _status.value = failed
+            return failed
+        }
+
+        repository.logAudit(
+            AuditLogEntity(
+                action = "SOS_TRIGGERED",
+                details = "source=$triggerSource queuedId=$rowId locationAvailable=${location != null}",
+                timestamp = startedAt,
             ),
         )
-        repository.logAudit(
-            triggerType = triggerSource,
-            actionDetails = "Emergency triggered (device event $clientEventId)",
-            status = "TRIGGERED",
-            userId = userId,
-        )
-        _active.value = SosActiveState(
+
+        var status = SosStatus(
             clientEventId = clientEventId,
-            triggerSource = triggerSource,
-            startedAt = now,
             stage = SosStage.TRIGGERED,
-            syncStatus = "PENDING",
+            triggerSource = triggerSource,
+            startedAt = startedAt,
+            locationAvailable = location != null,
         )
+        _status.value = status
 
-        if (location == null) {
-            problems += "Location is not available, so your contacts and responders will not see your position."
-        }
-
-        // 2. Local emergency actions. These never depend on the network.
-        val contacts = repository.getAllContactsOnce().sortedByDescending { it.priority }
-        val primaryContact = contacts.firstOrNull { it.phone.isNotBlank() }
-
-        val callOutcome: EmergencyActionResult?
-        val callTarget: String?
-        if (primaryContact != null) {
-            callTarget = primaryContact.phone
-            callOutcome = EmergencyCallManager.callNumber(context, primaryContact.phone)
-        } else {
-            callTarget = null
-            callOutcome = EmergencyActionResult.Failed(
-                "No emergency contact with a phone number is saved, so no call was placed.",
+        // 2. Device actions: emergency call and SMS, independent of the network.
+        val callOutcome = try {
+            EmergencyCallManager.callEmergency(context, contactPhoneNumbers.firstOrNull())
+        } catch (error: SecurityException) {
+            EmergencyActionResult.Failure(
+                message = "Android blocked the emergency call.",
+                detail = error.message ?: "CALL_PHONE was not granted.",
             )
-            problems += "No emergency contact with a phone number is saved."
+        } catch (error: Exception) {
+            EmergencyActionResult.Failure(
+                message = "The emergency call could not be started.",
+                detail = error.message ?: error.javaClass.simpleName,
+            )
         }
+
         when (callOutcome) {
-            is EmergencyActionResult.Dispatched -> repository.logAudit(
-                triggerType = "CALL",
-                actionDetails = callOutcome.detail,
-                status = "SUCCESS",
-                userId = userId,
-            )
-            is EmergencyActionResult.UserActionRequired -> {
-                problems += callOutcome.detail
-                repository.logAudit("CALL", callOutcome.detail, "FAILED", userId)
-            }
-            is EmergencyActionResult.Failed -> {
-                problems += callOutcome.message
-                repository.logAudit("CALL", callOutcome.message, "FAILED", userId)
-            }
-        }
-
-        val deliveries = contacts
-            .filter { it.phone.isNotBlank() }
-            .map { contact ->
-                EmergencySmsManager.sendEmergencySms(
-                    context = context,
-                    phoneNumber = contact.phone,
-                    userName = displayName?.takeIf { it.isNotBlank() } ?: "A Guardian user",
-                    latitude = location?.latitude,
-                    longitude = location?.longitude,
-                    accuracyM = location?.accuracy?.takeIf { location.hasAccuracy() },
-                    batteryLevel = batteryLevel,
-                    timestamp = now,
+            is EmergencyActionResult.Success -> {
+                status = status.copy(
+                    stage = SosStage.CALL_STARTED,
+                    callOutcome = callOutcome,
+                    callTarget = callOutcome.detail,
                 )
             }
-        deliveries.filter { it.status == SmsStatus.FAILED || it.status == SmsStatus.COMPOSE_OPENED }
-            .forEach { delivery ->
-                problems += delivery.detail
-                repository.logAudit("SMS", delivery.detail, "FAILED", userId)
+            is EmergencyActionResult.UserActionRequired -> {
+                problems += callOutcome.detail
+                status = status.copy(callOutcome = callOutcome, problems = problems.toList())
             }
-        deliveries.filter { it.status == SmsStatus.QUEUED || it.status == SmsStatus.SENT }
-            .forEach { delivery ->
-                repository.logAudit("SMS", delivery.detail, "SUCCESS", userId)
+            is EmergencyActionResult.Failure -> {
+                problems += callOutcome.message
+                status = status.copy(callOutcome = callOutcome, problems = problems.toList())
             }
-        if (contacts.isEmpty()) {
-            problems += "No emergency contacts are saved, so no alert text could be sent."
         }
+        _status.value = status
 
-        val stage = when {
-            deliveries.any { it.status == SmsStatus.QUEUED || it.status == SmsStatus.SENT } -> SosStage.SMS_STARTED
-            callOutcome is EmergencyActionResult.Dispatched -> SosStage.CALL_STARTED
-            else -> SosStage.TRIGGERED
-        }
-        _active.value = _active.value?.copy(stage = stage)
-
-        // 3. Cloud synchronisation: queued now, executed by the Worker. It is
-        //    explicitly NOT required for the local emergency to have happened.
-        scheduleCloudSync()
-        val synced = runCatching { trySyncQueue() }.getOrElse { error ->
-            Log.w(TAG, "Immediate emergency sync attempt failed", error)
-            0
-        }
-        if (synced > 0) {
-            val record = repository.getSosByClientEventId(clientEventId)
-            _active.value = _active.value?.copy(
-                stage = SosStage.CLOUD_SYNCED,
-                syncStatus = record?.syncStatus ?: "SYNCED",
-                remoteId = record?.remoteId,
-            )
+        var deliveries: List<SmsDelivery> = emptyList()
+        if (contactPhoneNumbers.isEmpty()) {
+            problems += "No emergency contacts are saved, so no alert messages were sent. Add contacts in the app."
         } else {
-            problems += "Your emergency is saved on this device and will sync to your family as soon as there is a connection."
-        }
-
-        // Share the live location with the family group when one exists.
-        if (location != null) {
-            runCatching { shareLocationWithFamily(location) }
-                .onFailure { Log.w(TAG, "Family location share failed", it) }
-        }
-
-        val finalRecord = repository.getSosByClientEventId(clientEventId)
-        val result = SosTriggerResult(
-            clientEventId = clientEventId,
-            stage = if (finalRecord?.syncStatus == "SYNCED") SosStage.CLOUD_SYNCED else stage,
-            callTarget = callTarget,
-            callOutcome = callOutcome,
-            smsDeliveries = deliveries,
-            locationAvailable = location != null,
-            cloudQueued = true,
-            cloudSynced = finalRecord?.syncStatus == "SYNCED",
-            problems = problems.toList(),
-        )
-
-        if (result.cloudSynced) {
-            repository.logAudit(
-                triggerType = "CLOUD_SYNC",
-                actionDetails = "Emergency acknowledged by the Guardian service (event ${finalRecord?.remoteId ?: queueId})",
-                status = "SUCCESS",
-                userId = userId,
-            )
-        }
-        return result
-    }
-
-    /** Marks the emergency resolved. Only reports success when the server agreed. */
-    suspend fun resolve(clientEventId: String, note: String? = null): ApiResult<Unit> {
-        val record = repository.getSosByClientEventId(clientEventId)
-            ?: return ApiResult.Failure(
-                com.guardian.safety.remote.ApiError("not_found", "That emergency is no longer on this device."),
-            )
-        val remoteId = record.remoteId
-        if (remoteId == null) {
-            repository.updateSosQueue(record.copy(emergencyStatus = "CANCELLED", syncStatus = "PENDING"))
-            repository.logAudit("SYSTEM", "Emergency cancelled on the device; the server has not been told yet.", "CANCELLED")
-            _active.value = null
-            return ApiResult.Failure(
-                com.guardian.safety.remote.ApiError(
-                    "not_synced",
-                    "The emergency was cancelled on this device but never reached the Guardian service, so your family could not be notified.",
-                ),
-            )
-        }
-        val result = repository.resolveSos(remoteId, note)
-        return when (result) {
-            is ApiResult.Success -> {
-                repository.updateSosQueue(record.copy(emergencyStatus = "RESOLVED"))
-                repository.logAudit("SYSTEM", "Emergency resolved on the server.", "SUCCESS")
-                _active.value = null
-                ApiResult.Success(Unit, result.statusCode)
+            deliveries = try {
+                EmergencySmsManager.sendEmergencySms(
+                    context = context,
+                    recipients = contactPhoneNumbers,
+                    identity = sessionManager.currentSession()?.displayName ?: "A Guardian user",
+                    latitude = location?.latitude,
+                    longitude = location?.longitude,
+                    accuracyM = location?.accuracy,
+                    batteryLevel = batteryLevel,
+                    clientEventId = clientEventId,
+                )
+            } catch (error: Exception) {
+                problems += "Alert messages could not be handed to Android: ${error.message ?: error.javaClass.simpleName}."
+                emptyList()
             }
-            is ApiResult.Failure -> result
+
+            val failedDeliveries = deliveries.filter { it.status == SmsStatus.FAILED || it.status == SmsStatus.PERMISSION_REQUIRED }
+            if (failedDeliveries.isNotEmpty()) {
+                problems += "${failedDeliveries.size} alert message(s) were not sent: ${failedDeliveries.first().detail}"
+            }
+            if (deliveries.any { it.status == SmsStatus.COMPOSE_OPENED }) {
+                problems += "Android requires you to confirm the alert message in your messaging app (SEND_SMS is not granted)."
+            }
+            if (deliveries.isNotEmpty()) {
+                status = status.copy(stage = SosStage.SMS_STARTED)
+            }
         }
+        status = status.copy(smsDeliveries = deliveries, problems = problems.toList())
+        _status.value = status
+
+        // 3. Family/community share, still on-device first and only reported once
+        //    the server confirms it.
+        if (shareLocationWithFamily && location != null) {
+            val shared = try {
+                repository.shareEmergencyLocation(location, accuracyM = location.accuracy)
+            } catch (error: Exception) {
+                ApiResult.Failure(
+                    com.guardian.safety.remote.ApiError(
+                        code = "share_failed",
+                        message = error.message ?: "Location share failed.",
+                    ),
+                )
+            }
+            when (shared) {
+                is ApiResult.Success -> status = status.copy(locationShared = true)
+                is ApiResult.Failure -> problems += "Your family could not be notified with your location yet: ${shared.error.message} It will be sent when the connection returns."
+            }
+        } else if (location == null) {
+            problems += "Location was unavailable, so the alert was sent without coordinates."
+        }
+        status = status.copy(problems = problems.toList())
+        _status.value = status
+
+        // 4. Cloud upload, queued now and idempotent thanks to clientEventId.
+        val queuedWork = enqueueCloudSync()
+        status = status.copy(
+            cloudQueued = queuedWork,
+            cloudError = if (queuedWork) null else "Background sync could not be scheduled; the alert stays on this device.",
+        )
+        _status.value = status
+
+        val synced = trySyncQueue()
+        val row = repository.getSosByClientEventId(clientEventId)
+        status = status.copy(
+            stage = when {
+                row?.syncStatus == SYNCED_SYNC_STATUS -> SosStage.CLOUD_SYNCED
+                else -> status.stage
+            },
+            remoteId = row?.remoteId,
+            cloudSynced = row?.syncStatus == SYNCED_SYNC_STATUS,
+            cloudError = row?.lastError ?: status.cloudError,
+            problems = (status.problems + synced.problems).distinct(),
+        )
+        _status.value = status
+        return status
     }
 
-    /** Marks the local emergency as cancelled without contacting the server. */
-    suspend fun cancelLocally(clientEventId: String) {
-        val record = repository.getSosByClientEventId(clientEventId) ?: return
-        repository.updateSosQueue(record.copy(emergencyStatus = "CANCELLED"))
-        repository.logAudit("SYSTEM", "Emergency cancelled by the user on this device.", "CANCELLED")
-        _active.value = null
+    /** Uploads every queued emergency. Returns counts, not optimism. */
+    suspend fun trySyncQueue(): SyncOutcome {
+        var uploaded = 0
+        val problems = mutableListOf<String>()
+        val pending = repository.getUnsentSosQueue()
+        for (item in pending) {
+            when (val result = repository.syncSosEvent(item)) {
+                is ApiResult.Success -> uploaded++
+                is ApiResult.Failure -> {
+                    if (!result.error.isNetworkIssue) {
+                        problems += result.error.message
+                    }
+                }
+            }
+        }
+        return SyncOutcome(uploaded = uploaded, attempted = pending.size, problems = problems)
     }
 
     /**
-     * Sends everything still queued. Idempotent: each row keeps its original
-     * `clientEventId`, and rows are marked SYNCED only on server acceptance.
+     * Cancels an alert the user triggered by mistake.
+     *
+     * The local record is always marked cancelled. The server copy is only resolved
+     * when it exists *and* the request succeeded — a failed resolve is reported so
+     * the user knows their family was already alerted.
      */
-    suspend fun trySyncQueue(): Int {
-        val pending = repository.getPendingSosQueue()
-        var synced = 0
-        pending.forEach { item ->
-            if (item.retryCount >= MAX_SYNC_ATTEMPTS) {
-                repository.updateSosQueue(
-                    item.copy(
-                        syncStatus = "FAILED",
-                        lastError = item.lastError
-                            ?: "Guardian could not reach the emergency service after $MAX_SYNC_ATTEMPTS attempts.",
-                    ),
-                )
-                return@forEach
-            }
-            when (val result = repository.syncSosEvent(item)) {
-                is ApiResult.Success -> {
-                    synced++
-                    val active = _active.value
-                    if (active?.clientEventId == item.clientEventId) {
-                        _active.value = active.copy(
-                            stage = SosStage.CLOUD_SYNCED,
-                            syncStatus = "SYNCED",
-                            remoteId = result.data.remoteId,
-                            acknowledgedAt = result.data.acknowledgedAt,
-                        )
-                    }
-                }
-                is ApiResult.Failure -> {
-                    if (result.error.offline || result.error.retryable) {
-                        scheduleCloudSync(item.retryCount + 1)
-                    }
-                }
-            }
+    suspend fun cancel(clientEventId: String, note: String? = "Cancelled by the user on their device."): ApiResult<Unit> {
+        val row = repository.getSosByClientEventId(clientEventId)
+            ?: return ApiResult.Failure(
+                com.guardian.safety.remote.ApiError(
+                    code = "not_found",
+                    message = "That alert is no longer on this device.",
+                ),
+            )
+
+        repository.markSosCancelled(row, note)
+
+        val remoteId = row.remoteId
+        val resolve = if (remoteId != null) {
+            repository.resolveSosEvent(remoteId, note)
+        } else {
+            ApiResult.Success(Unit)
         }
-        return synced
-    }
 
-    /** Restores the active emergency banner after process death. */
-    suspend fun restoreActive(): SosActiveState? {
-        val active = repository.getPendingSosQueue()
-            .lastOrNull { it.emergencyStatus == "ACTIVE" || it.emergencyStatus == "TRIGGERED" }
-            ?: return null
-        val state = SosActiveState(
-            clientEventId = active.clientEventId,
-            triggerSource = active.triggerSource,
-            startedAt = active.timestamp,
-            stage = when (active.syncStatus) {
-                "SYNCED" -> SosStage.CLOUD_SYNCED
-                else -> SosStage.TRIGGERED
+        _status.value = (_status.value ?: SosStatus(
+            clientEventId = clientEventId,
+            stage = SosStage.CANCELLED,
+            triggerSource = row.triggerSource,
+            startedAt = row.createdAt,
+        )).copy(
+            stage = SosStage.CANCELLED,
+            cancelledAt = System.currentTimeMillis(),
+            cloudError = (resolve as? ApiResult.Failure)?.error?.message,
+            problems = if (resolve is ApiResult.Failure) {
+                listOf("Your family may already have seen this alert: ${resolve.error.message}")
+            } else {
+                emptyList()
             },
-            syncStatus = active.syncStatus,
-            remoteId = active.remoteId,
-            acknowledgedAt = active.acknowledgedAt,
-            lastError = active.lastError,
         )
-        _active.value = state
-        return state
+
+        repository.logAudit(
+            AuditLogEntity(
+                action = "SOS_CANCELLED",
+                details = "clientEventId=$clientEventId remoteResolved=${resolve is ApiResult.Success && remoteId != null}",
+                timestamp = System.currentTimeMillis(),
+            ),
+        )
+        return resolve
     }
 
-    fun scheduleCloudSync(attempt: Int = 0) {
+    /** Restores the emergency banner after a process restart. */
+    suspend fun restoreActive() {
+        val active = repository.getUnsentSosQueue().firstOrNull()
+            ?: repository.getPendingSosQueue().firstOrNull()
+        if (active != null && active.syncStatus != CANCELLED_SYNC_STATUS) {
+            _status.value = SosStatus(
+                clientEventId = active.clientEventId,
+                stage = if (active.syncStatus == SYNCED_SYNC_STATUS) SosStage.CLOUD_SYNCED else SosStage.TRIGGERED,
+                remoteId = active.remoteId,
+                triggerSource = active.triggerSource,
+                startedAt = active.createdAt,
+                locationAvailable = active.latitude != null && active.longitude != null,
+                cloudSynced = active.syncStatus == SYNCED_SYNC_STATUS,
+                cloudError = active.lastError,
+            )
+        }
+    }
+
+    fun clearStatus() {
+        _status.value = null
+    }
+
+    private fun enqueueCloudSync(): Boolean = try {
         val request = OneTimeWorkRequestBuilder<SosSyncWorker>()
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build(),
             )
-            .setBackoffCriteria(
-                BackoffPolicy.EXPONENTIAL,
-                (SosSyncWorker.BASE_BACKOFF_SECONDS * (attempt + 1)).coerceAtMost(MAX_BACKOFF_SECONDS),
-                TimeUnit.SECONDS,
-            )
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
-            SosSyncWorker.UNIQUE_WORK_NAME,
+            SosSyncWorker.URGENT_WORK_NAME,
             ExistingWorkPolicy.KEEP,
             request,
         )
+        true
+    } catch (error: Exception) {
+        Log.e(TAG, "Could not schedule emergency sync", error)
+        false
     }
 
-    private suspend fun shareLocationWithFamily(location: Location) {
-        val group = repository.getFamilyGroupOnce() ?: return
-        repository.shareLocation(
-            groupRemoteId = group.remoteId,
-            latitude = location.latitude,
-            longitude = location.longitude,
-            accuracy = location.accuracy.takeIf { location.hasAccuracy() },
-            batteryLevel = batteryLevel(),
-            source = "MANUAL",
-        )
-    }
-
-    private fun batteryLevel(): Int? = try {
-        val manager = context.getSystemService(BatteryManager::class.java)
-        manager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 }
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun networkStatus(): String {
-        val connectivityManager =
-            context.getSystemService(android.net.ConnectivityManager::class.java) ?: return "UNKNOWN"
-        val capabilities = connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork)
-            ?: return "OFFLINE"
-        return when {
-            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
-            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "CELLULAR"
-            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
-            else -> "UNKNOWN"
-        }
-    }
-
-    private fun deviceInfo(): String {
-        val hasCallPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) ==
-            PackageManager.PERMISSION_GRANTED
-        val hasSmsPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) ==
-            PackageManager.PERMISSION_GRANTED
-        val telephony = context.getSystemService(TelephonyManager::class.java)
-        return buildString {
-            append("Android ${Build.VERSION.RELEASE}; ")
-            append("${Build.MANUFACTURER} ${Build.MODEL}; ")
-            append("call_permission=${if (hasCallPermission) "granted" else "denied"}; ")
-            append("sms_permission=${if (hasSmsPermission) "granted" else "denied"}; ")
-            append("sim=${if ((telephony?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN) == TelephonyManager.SIM_STATE_READY) "ready" else "unavailable"}")
-        }
-    }
+    data class SyncOutcome(
+        val uploaded: Int,
+        val attempted: Int,
+        val problems: List<String>,
+    )
 
     companion object {
         private const val TAG = "SosEmergencyManager"
-        private const val MAX_SYNC_ATTEMPTS = 8
-        private const val MAX_BACKOFF_SECONDS = 30L
-    }
-}
 
-/** The emergency number to dial for the device's network, never a US default. */
-object EmergencyNumbers {
-
-    fun primary(context: Context): String {
-        val telephony = context.getSystemService(TelephonyManager::class.java)
-        if (telephony != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val numbers = telephony.emergencyNumberList
-            if (numbers != null) {
-                numbers.values.firstOrNull { it.number.isNotBlank() }?.let { return it.number }
-            }
-        }
-        // 112 is the GSM emergency number reachable in the EU, India and most of
-        // the world, including on devices with no SIM.
-        return "112"
+        /**
+         * Status used while an emergency is waiting for the server. It is
+         * deliberately distinct from `SYNCED`: nothing may claim server acceptance
+         * before the server answered.
+         */
+        const val UNVERIFIED_SYNC_STATUS = "PENDING"
+        const val SYNCED_SYNC_STATUS = "SYNCED"
+        const val CANCELLED_SYNC_STATUS = "CANCELLED"
     }
 }

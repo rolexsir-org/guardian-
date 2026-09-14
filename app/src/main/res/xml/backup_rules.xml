@@ -1,13 +1,22 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android full-backup rules (API 30 and below).
+
+   Guardian keeps safety data on the device: the SQLCipher database is keyed by a
+   random secret held in Keystore-backed encrypted preferences, so a cloud copy
+   could not be decrypted on another device anyway. Backup is therefore excluded
+   for everything except ordinary user preferences, keeping emergency contacts,
+   medical details and location history off cloud storage.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- The encrypted safety database is never copied off the device. -->
+    <exclude domain="database" path="guardian_database" />
+    <exclude domain="database" path="guardian_database-wal" />
+    <exclude domain="database" path="guardian_database-shm" />
+
+    <!-- Keystore-backed credential and preference storage. -->
+    <exclude domain="sharedpref" path="guardian_secure_prefs_v2.xml" />
+
+    <!-- Cached evidence and exports. -->
+    <exclude domain="file" path="evidence" />
 </full-backup-content>
