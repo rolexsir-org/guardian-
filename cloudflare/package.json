@@ -1,0 +1,28 @@
+{
+  "name": "guardian-cloudflare-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Guardian production backend: Cloudflare Workers + D1 + Durable Objects + R2",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply guardian-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply guardian-db --remote",
+    "db:migrations:list": "wrangler d1 migrations list guardian-db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260914.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.131.2"
+  }
+}
