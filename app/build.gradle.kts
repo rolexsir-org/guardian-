@@ -142,7 +142,6 @@ dependencies {
   implementation(libs.converter.moshi)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.retrofit)
@@ -150,12 +149,10 @@ dependencies {
   // configuration, never a secret.
   implementation(libs.revenuecat.purchases)
 
-  testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
-  testImplementation(libs.okhttp)
   testImplementation(libs.robolectric)
 
   androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -93,7 +93,29 @@ credentials are present; no keystore is committed.
 
 Covered: package identity, authentication and token handling, offline queueing and
 retry, location capture, the SQLCipher 6→7 migration, encrypted preference flags,
-emergency-number resolution, sensor fail-closed behaviour, and subscription state.
+emergency-number resolution, sensor fail-closed behaviour, subscription state, and the
+emergency call/SMS result contract.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` is the authority on whether Guardian builds. It runs on
+every push and pull request:
+
+| Job | What actually runs |
+| --- | --- |
+| `cloudflare` | `npm ci`, `npm run typecheck`, `npm test`, `wrangler deploy --dry-run` |
+| `hygiene` | Fails if secret-bearing files become tracked, if Firebase / AI Studio references return to shipped source, or if demo coordinates appear in `app/src/main` |
+| `android` | `testDebugUnitTest`, `lintDebug`, `assembleDebug`, `assembleRelease` on JDK 21 |
+
+JDK 21 is required because the unit tests run under Robolectric against SDK 36.
+`assembleRelease` in CI produces an intentionally **unsigned** artifact: no keystore
+exists in the repository, and one is never committed.
+
+`.github/workflows/deploy-backend.yml` deploys the Worker with `wrangler deploy` and is
+`workflow_dispatch` only. It refuses to run — with a clear message rather than a
+fabricated success — until `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and
+`D1_DATABASE_ID` exist as repository secrets, then applies D1 migrations, deploys, and
+smoke-tests `/v1/health`.
 
 ## Security notes
 
@@ -104,6 +126,38 @@ emergency-number resolution, sensor fail-closed behaviour, and subscription stat
 * Cleartext traffic is disabled; the client only accepts HTTPS endpoints.
 * R8 minification and resource shrinking are on, with keep rules limited to what the
   SQLCipher native bridge, Room and the Compose/serialization stack require.
+
+## Release status
+
+Honest summary of what has been executed against real tooling versus what is waiting
+on an external credential. Nothing below is claimed without a command having run.
+
+**Verified**
+
+* Cloudflare Worker: `tsc --noEmit` clean, `vitest run` 57/57 passing, and
+  `wrangler deploy --dry-run` bundling the Worker with all four bindings resolved
+  (`SAFETY_HUB` DO, `DB` D1, `EVIDENCE` R2, vars).
+* D1 schema: both migrations applied to a real local D1 (53 statements), producing
+  19 tables and 32 indexes.
+* Backend is a Worker end to end — there is no `wrangler pages deploy` anywhere, and
+  CI fails the build if one is reintroduced.
+
+**Blocked on credentials the repository must not contain**
+
+| Gate | Blocker |
+| --- | --- |
+| Production deploy, D1/R2/DO provisioning | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID`, `AUTH_SECRET` |
+| Release signing | No keystore; `assembleRelease` is unsigned by design |
+| RevenueCat production billing | No public Android SDK key and no store configuration |
+
+**Not verified locally**
+
+Android compilation, unit tests, lint and both APK assemblies run in CI, not in the
+authoring environment: that sandbox has no JDK and no network route to
+`dl.google.com` or `repo.maven.apache.org`, so Gradle cannot resolve AGP, Kotlin or
+AndroidX at all. Results are therefore taken from the `android` CI job rather than
+asserted here. On-device QA (real call, real SMS, real GPS, sensors, reboot,
+background restrictions) requires hardware and has not been performed.
 
 ## Origin of this repository
 
