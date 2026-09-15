@@ -21,6 +21,7 @@ import com.guardian.safety.service.describe
 import com.guardian.safety.service.EmergencyCallManager
 import com.guardian.safety.service.EmergencyNumbers
 import com.guardian.safety.ui.GuardianViewModel
+import com.guardian.safety.util.ExternalIntents
 import com.guardian.safety.util.HapticUtils
 
 /**
@@ -318,11 +319,18 @@ fun EmergencyResponderCard(
                             if (lat == null || lng == null) {
                                 onProblem("This emergency has no location to navigate to.")
                             } else {
-                                val intent = android.content.Intent(
-                                    android.content.Intent.ACTION_VIEW,
-                                    android.net.Uri.parse("geo:$lat,$lng?q=$lat,$lng(Emergency+location)"),
+                                // A device with no maps app must not crash the
+                                // responder screen: the failure is reported and a
+                                // browser map is tried first.
+                                val result = ExternalIntents.showOnMap(
+                                    context = context,
+                                    latitude = lat,
+                                    longitude = lng,
+                                    label = "Emergency location",
                                 )
-                                context.startActivity(intent)
+                                if (result is ExternalIntents.LaunchResult.Unavailable) {
+                                    onProblem(result.message)
+                                }
                             }
                         },
                         modifier = Modifier.weight(1f)
