@@ -45,6 +45,45 @@ npm test          # 57 tests
 `wrangler.toml` intentionally ships `database_id = "REPLACE_WITH_D1_DATABASE_ID"`. It is
 replaced with the real id at deploy time; a real database id must never be committed.
 
+### Deploying: this is a Worker, not a Pages site
+
+The Cloudflare Workers Builds check on pull requests currently **fails** with:
+
+```
+✘ [ERROR] Could not detect a directory containing static files (e.g. html, css and js) for the project
+```
+
+That message is misleading — Guardian has no frontend to deploy and does not need one.
+The cause is a **build configuration** problem, not a repository problem:
+
+* the Worker's `wrangler.toml` lives in `cloudflare/`, not at the repository root;
+* Workers Builds runs from the repository root by default, finds no wrangler config,
+  and falls back to Pages-style static-asset detection — which then finds no `index.html`.
+
+Reproduce the failure and the fix locally:
+
+```bash
+npx wrangler deploy --dry-run              # from repo root -> the static-files error
+cd cloudflare && npx wrangler deploy --dry-run --outdir dist   # -> succeeds
+```
+
+The fix is to point the build at the Worker, in the Cloudflare dashboard under
+*Workers & Pages → guardian → Settings → Builds*:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `cloudflare` |
+| Build command | `npm ci && npm run typecheck && npm test` |
+| Deploy command | `npx wrangler deploy` |
+
+`.github/workflows/deploy-backend.yml` (staged in `ci/`, see below) already deploys
+correctly because it `cd`s into `cloudflare/` first.
+
+**Do not "fix" this by adding an `index.html` or a static directory.** That would
+suppress the error message while deploying an empty site instead of the API, and the
+Worker endpoints would silently 404. Changing the build root is the only correct fix,
+and it requires dashboard access that CI tokens alone do not grant.
+
 ## Android (`app/`)
 
 Package `com.guardian.safety`. Kotlin 2.3.21, AGP 9.1, Jetpack Compose, Room, WorkManager.
@@ -126,6 +165,30 @@ smoke-tests `/v1/health`.
 * Cleartext traffic is disabled; the client only accepts HTTPS endpoints.
 * R8 minification and resource shrinking are on, with keep rules limited to what the
   SQLCipher native bridge, Room and the Compose/serialization stack require.
+* Protected screens fail closed. `BiometricAuthManager` reports an explicit outcome and
+  never treats "no enrolled biometric", a missing host activity or an unexpected
+  exception as success, and no screen offers a bypass that skips confirmation.
+* Hand-offs to other apps (dial, SMS composer, maps, share) go through
+  `util/ExternalIntents`, which catches `ActivityNotFoundException` and reports the
+  failure instead of crashing a safety screen. The manifest declares a scoped
+  `<queries>` element for exactly those handlers — `QUERY_ALL_PACKAGES` is not used.
+
+### Dependency advisories
+
+`npm audit` in `cloudflare/` reports **4 high-severity advisories and 0 in production
+dependencies**:
+
+```bash
+cd cloudflare
+npm audit --omit=dev   # -> 0 vulnerabilities
+npm audit              # -> 4 high, all via wrangler/miniflare/vitest-pool-workers
+```
+
+All four resolve to `sharp` → `libheif` (GHSA-g89c-p67h-r497, GHSA-2jg2-4ch7-h545),
+pulled in transitively by `wrangler` and the vitest Workers pool. They are build- and
+test-time only: nothing from `devDependencies` is bundled into the deployed Worker, as
+`wrangler deploy --dry-run` confirms. No upgrade is available that keeps the pinned
+wrangler major, so they are accepted and tracked rather than silently ignored.
 
 ## Release status
 
@@ -141,6 +204,15 @@ on an external credential. Nothing below is claimed without a command having run
   19 tables and 32 indexes.
 * Backend is a Worker end to end — there is no `wrangler pages deploy` anywhere, and
   CI fails the build if one is reintroduced.
+* Production npm dependencies: 0 advisories (`npm audit --omit=dev`).
+
+**Known failing check**
+
+The `Workers Builds: guardian` check on pull requests fails with "Could not detect a
+directory containing static files". This is a Cloudflare build-root misconfiguration,
+not a code defect — see *Deploying: this is a Worker, not a Pages site* above for the
+reproduction and the dashboard setting that fixes it. It is deliberately **not** masked
+with a placeholder `index.html`.
 
 **Blocked on credentials the repository must not contain**
 
