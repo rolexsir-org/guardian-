@@ -38,6 +38,18 @@ data class ApiError(
     /** True when the session/credentials are no longer valid. */
     val unauthorized: Boolean = false,
 ) {
+
+    /**
+     * True when the failure was connectivity rather than a decision by the server.
+     *
+     * Callers use this to decide whether to queue a retry instead of showing an
+     * error the user cannot act on. It is derived from the structured flags and
+     * codes, never from parsing the message.
+     */
+    val isNetworkIssue: Boolean
+        get() = offline || code == OFFLINE || code == TIMEOUT || code == NETWORK_ERROR ||
+            (httpStatus != null && httpStatus in 500..599)
+
     companion object {
         const val NOT_CONFIGURED = "not_configured"
         const val OFFLINE = "offline"

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 import java.util.UUID
@@ -225,21 +226,109 @@ class SecureEncryptedPreferences private constructor(context: Context) {
     fun isIncidentSubscribed(category: String, defaultVal: Boolean = true): Boolean =
         prefs().getBoolean(subscriptionKey(category), defaultVal)
 
+    /** Snapshot of every known category subscription, for the notification UI. */
+    fun incidentSubscriptions(categories: Collection<String>): Map<String, Boolean> =
+        categories.associateWith { isIncidentSubscribed(it) }
+
     private fun subscriptionKey(category: String) = "sub_$category"
+
+    // ------------------------------------------------------------------- flags
+
+    /**
+     * Device settings that drive safety behaviour.
+     *
+     * Every flag lives in the encrypted store and is exposed both as a plain read
+     * (for code paths that run once) and as a [StateFlow] (for Compose). Writes
+     * propagate to the flow immediately, and a write to unusable storage throws
+     * [SecureStorageUnavailableException] rather than pretending the setting was
+     * saved — the caller reports the failure.
+     */
+    private val flags = ConcurrentHashMap<String, MutableStateFlow<Boolean>>()
+
+    private fun flag(key: String, default: Boolean): StateFlow<Boolean> =
+        flags.getOrPut(key) {
+            MutableStateFlow(runCatching { prefs().getBoolean(key, default) }.getOrDefault(default))
+        }.asStateFlow()
+
+    private fun readFlag(key: String, default: Boolean): Boolean =
+        runCatching { prefs().getBoolean(key, default) }.getOrDefault(default)
+
+    private fun writeFlag(key: String, value: Boolean) {
+        prefs().edit().putBoolean(key, value).commit()
+        flags[key]?.value = value
+    }
+
+    fun isLiveGpsEnabled(): Boolean = readFlag(KEY_LIVE_GPS, DEFAULT_LIVE_GPS)
+    fun isLiveGpsEnabledFlow(): StateFlow<Boolean> = flag(KEY_LIVE_GPS, DEFAULT_LIVE_GPS)
+    fun setLiveGpsEnabled(enabled: Boolean) = writeFlag(KEY_LIVE_GPS, enabled)
+
+    fun isVoiceActivationEnabled(): Boolean = readFlag(KEY_VOICE_ACTIVATION, DEFAULT_VOICE_ACTIVATION)
+    fun isVoiceActivationEnabledFlow(): StateFlow<Boolean> = flag(KEY_VOICE_ACTIVATION, DEFAULT_VOICE_ACTIVATION)
+    fun setVoiceActivationEnabled(enabled: Boolean) = writeFlag(KEY_VOICE_ACTIVATION, enabled)
+
+    fun isFallDetectionEnabled(): Boolean = readFlag(KEY_FALL_DETECTION, DEFAULT_FALL_DETECTION)
+    fun isFallDetectionEnabledFlow(): StateFlow<Boolean> = flag(KEY_FALL_DETECTION, DEFAULT_FALL_DETECTION)
+    fun setFallDetectionEnabled(enabled: Boolean) = writeFlag(KEY_FALL_DETECTION, enabled)
+
+    fun isCrashSosEnabled(): Boolean = readFlag(KEY_CRASH_SOS, DEFAULT_CRASH_SOS)
+    fun isCrashSosEnabledFlow(): StateFlow<Boolean> = flag(KEY_CRASH_SOS, DEFAULT_CRASH_SOS)
+    fun setCrashSosEnabled(enabled: Boolean) = writeFlag(KEY_CRASH_SOS, enabled)
+
+    fun isShakeGestureEnabled(): Boolean = readFlag(KEY_SHAKE_GESTURE, DEFAULT_SHAKE_GESTURE)
+    fun isShakeGestureEnabledFlow(): StateFlow<Boolean> = flag(KEY_SHAKE_GESTURE, DEFAULT_SHAKE_GESTURE)
+    fun setShakeGestureEnabled(enabled: Boolean) = writeFlag(KEY_SHAKE_GESTURE, enabled)
+
+    fun isAutoSosSilenceEnabled(): Boolean = readFlag(KEY_AUTO_SOS_SILENCE, DEFAULT_AUTO_SOS_SILENCE)
+    fun isAutoSosSilenceEnabledFlow(): StateFlow<Boolean> = flag(KEY_AUTO_SOS_SILENCE, DEFAULT_AUTO_SOS_SILENCE)
+    fun setAutoSosSilenceEnabled(enabled: Boolean) = writeFlag(KEY_AUTO_SOS_SILENCE, enabled)
+
+    fun isBackgroundMonitoringEnabled(): Boolean = readFlag(KEY_BACKGROUND_MONITORING, DEFAULT_BACKGROUND_MONITORING)
+    fun isBackgroundMonitoringEnabledFlow(): StateFlow<Boolean> =
+        flag(KEY_BACKGROUND_MONITORING, DEFAULT_BACKGROUND_MONITORING)
+    fun setBackgroundMonitoringEnabled(enabled: Boolean) = writeFlag(KEY_BACKGROUND_MONITORING, enabled)
+
+    fun isGuardianProximityEnabled(): Boolean = readFlag(KEY_GUARDIAN_PROXIMITY, DEFAULT_GUARDIAN_PROXIMITY)
+    fun isGuardianProximityEnabledFlow(): StateFlow<Boolean> =
+        flag(KEY_GUARDIAN_PROXIMITY, DEFAULT_GUARDIAN_PROXIMITY)
+    fun setGuardianProximityEnabled(enabled: Boolean) = writeFlag(KEY_GUARDIAN_PROXIMITY, enabled)
+
+    fun isCloudRecordEnabled(): Boolean = readFlag(KEY_CLOUD_RECORD, DEFAULT_CLOUD_RECORD)
+    fun isCloudRecordEnabledFlow(): StateFlow<Boolean> = flag(KEY_CLOUD_RECORD, DEFAULT_CLOUD_RECORD)
+    fun setCloudRecordEnabled(enabled: Boolean) = writeFlag(KEY_CLOUD_RECORD, enabled)
+
+    fun isAudioBlackboxEnabled(): Boolean = readFlag(KEY_AUDIO_BLACKBOX, DEFAULT_AUDIO_BLACKBOX)
+    fun isAudioBlackboxEnabledFlow(): StateFlow<Boolean> = flag(KEY_AUDIO_BLACKBOX, DEFAULT_AUDIO_BLACKBOX)
+    fun setAudioBlackboxEnabled(enabled: Boolean) = writeFlag(KEY_AUDIO_BLACKBOX, enabled)
+
+    fun isIncognitoModeEnabled(): Boolean = readFlag(KEY_INCOGNITO_MODE, DEFAULT_INCOGNITO_MODE)
+    fun isIncognitoModeEnabledFlow(): StateFlow<Boolean> = flag(KEY_INCOGNITO_MODE, DEFAULT_INCOGNITO_MODE)
+    fun setIncognitoModeEnabled(enabled: Boolean) = writeFlag(KEY_INCOGNITO_MODE, enabled)
+
+    fun isBiometricLockEnabled(): Boolean = readFlag(KEY_BIOMETRIC_LOCK, DEFAULT_BIOMETRIC_LOCK)
+    fun isBiometricLockEnabledFlow(): StateFlow<Boolean> = flag(KEY_BIOMETRIC_LOCK, DEFAULT_BIOMETRIC_LOCK)
+    fun setBiometricLockEnabled(enabled: Boolean) = writeFlag(KEY_BIOMETRIC_LOCK, enabled)
 
     // --------------------------------------------------------- parental controls
 
-    fun isStudyModeEnabled(): Boolean = prefs().getBoolean(KEY_STUDY_MODE, false)
+    fun isStudyModeEnabled(): Boolean = readFlag(KEY_STUDY_MODE, DEFAULT_STUDY_MODE)
+    fun isStudyModeEnabledFlow(): StateFlow<Boolean> = flag(KEY_STUDY_MODE, DEFAULT_STUDY_MODE)
 
-    fun setStudyModeEnabled(enabled: Boolean) {
-        prefs().edit().putBoolean(KEY_STUDY_MODE, enabled).commit()
-    }
+    fun setStudyModeEnabled(enabled: Boolean) = writeFlag(KEY_STUDY_MODE, enabled)
 
-    fun isBedtimeScheduleEnabled(): Boolean = prefs().getBoolean(KEY_BEDTIME_SCHEDULE, true)
+    fun isBedtimeScheduleEnabled(): Boolean = readFlag(KEY_BEDTIME_SCHEDULE, DEFAULT_BEDTIME_SCHEDULE)
+    fun isBedtimeScheduleEnabledFlow(): StateFlow<Boolean> = flag(KEY_BEDTIME_SCHEDULE, DEFAULT_BEDTIME_SCHEDULE)
 
-    fun setBedtimeScheduleEnabled(enabled: Boolean) {
-        prefs().edit().putBoolean(KEY_BEDTIME_SCHEDULE, enabled).commit()
-    }
+    fun setBedtimeScheduleEnabled(enabled: Boolean) = writeFlag(KEY_BEDTIME_SCHEDULE, enabled)
+
+    // -------------------------------------------------------- emergency delivery
+
+    /**
+     * Whether emergency call/SMS actions may be dispatched to saved contacts.
+     * Off means the user only ever sees the dialler/composer.
+     */
+    fun isEmergencyDeliveryEnabled(): Boolean = readFlag(KEY_EMERGENCY_DELIVERY, DEFAULT_EMERGENCY_DELIVERY)
+
+    fun setEmergencyDeliveryEnabled(enabled: Boolean) = writeFlag(KEY_EMERGENCY_DELIVERY, enabled)
 
     // --------------------------------------------------- risk alert de-duplication
 
@@ -304,6 +393,8 @@ class SecureEncryptedPreferences private constructor(context: Context) {
         prefs().edit().clear().apply {
             if (!deviceId.isNullOrBlank()) putString(KEY_DEVICE_ID, deviceId)
         }.commit()
+        // Cached flag flows must not keep advertising values that were just wiped.
+        flags.clear()
     }
 
     companion object {
@@ -332,6 +423,38 @@ class SecureEncryptedPreferences private constructor(context: Context) {
         private const val KEY_DB_PASSPHRASE = "secure_database_passphrase"
         private const val KEY_DEVICE_ID = "secure_device_id"
         private const val KEY_HEALTH_PROBE = "__guardian_secure_store_probe"
+
+        // Safety behaviour flags. Defaults are conservative: anything that can act
+        // on the user's behalf without a tap (direct calling/SMS, automatic
+        // recording, automatic SOS) starts OFF and must be switched on explicitly.
+        private const val KEY_LIVE_GPS = "secure_live_gps"
+        private const val DEFAULT_LIVE_GPS = true
+        private const val KEY_VOICE_ACTIVATION = "secure_voice_activation"
+        private const val DEFAULT_VOICE_ACTIVATION = false
+        private const val KEY_FALL_DETECTION = "secure_fall_detection"
+        private const val DEFAULT_FALL_DETECTION = false
+        private const val KEY_CRASH_SOS = "secure_crash_sos"
+        private const val DEFAULT_CRASH_SOS = false
+        private const val KEY_SHAKE_GESTURE = "secure_shake_gesture"
+        private const val DEFAULT_SHAKE_GESTURE = false
+        private const val KEY_AUTO_SOS_SILENCE = "secure_auto_sos_silence"
+        private const val DEFAULT_AUTO_SOS_SILENCE = false
+        private const val KEY_BACKGROUND_MONITORING = "secure_background_monitoring"
+        private const val DEFAULT_BACKGROUND_MONITORING = false
+        private const val KEY_GUARDIAN_PROXIMITY = "secure_guardian_proximity"
+        private const val DEFAULT_GUARDIAN_PROXIMITY = true
+        private const val KEY_CLOUD_RECORD = "secure_cloud_record"
+        private const val DEFAULT_CLOUD_RECORD = false
+        private const val KEY_AUDIO_BLACKBOX = "secure_audio_blackbox"
+        private const val DEFAULT_AUDIO_BLACKBOX = false
+        private const val KEY_INCOGNITO_MODE = "secure_incognito_mode"
+        private const val DEFAULT_INCOGNITO_MODE = false
+        private const val KEY_BIOMETRIC_LOCK = "secure_biometric_lock"
+        private const val DEFAULT_BIOMETRIC_LOCK = true
+        private const val KEY_EMERGENCY_DELIVERY = "secure_emergency_delivery"
+        private const val DEFAULT_EMERGENCY_DELIVERY = true
+        private const val DEFAULT_STUDY_MODE = false
+        private const val DEFAULT_BEDTIME_SCHEDULE = true
 
         private val secureStorageError = MutableStateFlow<String?>(null)
 

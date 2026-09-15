@@ -2,11 +2,13 @@ package com.guardian.safety
 
 import android.app.Application
 import android.content.Context
+import android.os.BatteryManager
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.guardian.safety.billing.SubscriptionManager
 import com.guardian.safety.data.GuardianDatabase
 import com.guardian.safety.data.GuardianRepository
 import com.guardian.safety.remote.ApiClient
@@ -15,6 +17,7 @@ import com.guardian.safety.remote.CloudArtifactRepository
 import com.guardian.safety.remote.CloudConfig
 import com.guardian.safety.remote.CloudRepository
 import com.guardian.safety.remote.RealtimeClient
+import com.guardian.safety.service.AudioBlackboxRecorder
 import com.guardian.safety.service.LocationService
 import com.guardian.safety.service.LocationSyncCoordinator
 import com.guardian.safety.service.SecureEncryptedPreferences
@@ -36,9 +39,9 @@ import java.util.concurrent.TimeUnit
  *
  * Everything the app needs is constructed here exactly once and injected into the
  * ViewModel: encrypted preferences, the token store, the SQLCipher database, the
- * authenticated Guardian API client, the emergency managers and the background
- * workers. There is no hidden global state, no bootstrap credential and no
- * fallback backend.
+ * authenticated Guardian API client, the emergency managers, the subscription
+ * manager and the background workers. There is no hidden global state, no
+ * bootstrap credential and no fallback backend.
  *
  * If the cloud backend is not configured for this build the app still starts: the
  * container reports why, screens surface it, and everything that works without a
@@ -54,6 +57,20 @@ class GuardianApplication : Application() {
         super.onCreate()
         container = AppContainer(this)
     }
+
+    companion object {
+        /**
+         * The process-wide container, or null when the application class was
+         * replaced (for example by a test harness) and no container exists yet.
+         *
+         * Callers must handle null rather than silently constructing a second
+         * container that would open a second database and a second keystore key.
+         */
+        fun containerFrom(context: Context): AppContainer? {
+            val application = context.applicationContext as? GuardianApplication ?: return null
+            return runCatching { application.container }.getOrNull()
+        }
+    }
 }
 
 /** Long-lived dependencies, created once per process. */
@@ -66,7 +83,7 @@ class AppContainer(val application: Application) {
 
     val tokenManager: TokenManager = TokenManager(application)
 
-    val database: GuardianDatabase = GuardianDatabase.getInstance(application)
+    val database: GuardianDatabase = GuardianDatabase.getDatabase(application)
 
     /**
      * The authenticated HTTP client. When the server rejects a refresh token the
@@ -118,6 +135,15 @@ class AppContainer(val application: Application) {
         scope = appScope,
     )
 
+    /**
+     * Guardian Pro subscriptions. Completely separate from the Guardian backend:
+     * it only ever talks to the store and to RevenueCat.
+     */
+    val subscriptionManager: SubscriptionManager = SubscriptionManager(application)
+
+    /** Rolling local audio buffer used as emergency evidence. Never uploads by itself. */
+    val audioBlackbox: AudioBlackboxRecorder = AudioBlackboxRecorder(application)
+
     /** True when this build points at a real Guardian deployment. */
     val isCloudConfigured: Boolean = CloudConfig.configured
 
@@ -130,7 +156,17 @@ class AppContainer(val application: Application) {
     val databaseRecoveryNotice: String? = GuardianDatabase.recoveryNotice
 
     init {
+        // Attach the SDK to whoever is already signed in on this device, so
+        // entitlements resolve for the right account on a cold start.
+        subscriptionManager.configure(tokenManager.identity()?.userId)
         if (isCloudConfigured) scheduleBackgroundWork()
+    }
+
+    /** Real battery percentage, or null when the device will not say. */
+    fun batteryLevel(): Int? {
+        val manager = application.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return null
+        val level = runCatching { manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) }.getOrDefault(-1)
+        return level.takeIf { it in 0..100 }
     }
 
     /**
@@ -173,9 +209,8 @@ class AppContainer(val application: Application) {
 
     companion object {
         /**
-         * Returns the process-wide container. Falls back to a fresh instance when
-         * the application class was replaced (for example in tests), so callers
-         * never receive null.
+         * Returns the process-wide container, or a fresh one when the application
+         * class was replaced (for example in tests) so callers never receive null.
          */
         fun from(context: Context): AppContainer {
             val appContext = context.applicationContext as Application

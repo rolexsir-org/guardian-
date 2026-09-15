@@ -1,5 +1,6 @@
 package com.guardian.safety.ui.more
 
+import android.app.Activity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -32,6 +34,21 @@ fun MoreScreen(
     val sessionState by viewModel.sessionState.collectAsState()
     val accountLabel = (sessionState as? com.guardian.safety.service.SessionState.SignedIn)
         ?.session?.email ?: "Not signed in"
+    val proState by viewModel.proState.collectAsState()
+    var showProDialog by remember { mutableStateOf(false) }
+    // The store sheet needs a foreground activity; without one the button is not shown.
+    val activity = (LocalContext.current as? Activity)
+
+    LaunchedEffect(Unit) { viewModel.refreshProState() }
+
+    if (showProDialog) {
+        GuardianProDialog(
+            state = proState,
+            onDismiss = { showProDialog = false },
+            onPurchase = activity?.let { host -> { viewModel.purchasePro(host) } },
+            onRestore = { viewModel.restoreProPurchases() },
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = DarkBackground
@@ -77,6 +94,19 @@ fun MoreScreen(
             }
             item {
                 MoreTile(title = "Community responders", subtitle = "Help nearby Guardian users", icon = Icons.Default.VolunteerActivism, onClick = onNavigateToResponder)
+            }
+            item {
+                MoreTile(
+                    title = "Guardian Pro",
+                    subtitle = when (proState) {
+                        is com.guardian.safety.billing.ProState.Active -> "Active — thanks for supporting Guardian"
+                        is com.guardian.safety.billing.ProState.NotConfigured -> "Subscriptions are not available in this build"
+                        is com.guardian.safety.billing.ProState.Error -> (proState as com.guardian.safety.billing.ProState.Error).message
+                        else -> "Optional. Every safety feature stays free"
+                    },
+                    icon = Icons.Default.WorkspacePremium,
+                    onClick = { showProDialog = true },
+                )
             }
             item {
                 MoreTile(
@@ -129,4 +159,66 @@ fun MoreTile(title: String, subtitle: String, icon: ImageVector, onClick: () -> 
             Icon(Icons.Default.ChevronRight, contentDescription = null, tint = TextSecondary)
         }
     }
+}
+
+
+/**
+ * Guardian Pro details.
+ *
+ * Everything shown here comes from RevenueCat: the entitlement state, the real
+ * product price, and the outcome of a purchase or restore. When subscriptions are
+ * not configured for this build the dialog says so instead of offering a button that
+ * cannot do anything.
+ */
+@Composable
+fun GuardianProDialog(
+    state: com.guardian.safety.billing.ProState,
+    onDismiss: () -> Unit,
+    onPurchase: (() -> Unit)?,
+    onRestore: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = DarkCard,
+        title = { Text("Guardian Pro", color = TextPrimary, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    when (state) {
+                        is com.guardian.safety.billing.ProState.Active -> {
+                            val until = state.expiresAt
+                            if (until != null) {
+                                "Active until " + java.text.DateFormat.getDateInstance().format(java.util.Date(until)) +
+                                    ". Guardian Pro is handled by RevenueCat and the store; it never touches your safety data."
+                            } else {
+                                "Active. Guardian Pro is handled by RevenueCat and the store; it never touches your safety data."
+                            }
+                        }
+                        is com.guardian.safety.billing.ProState.NotConfigured ->
+                            "This build has no store configuration, so Guardian Pro cannot be purchased here. " +
+                                "Every safety feature works without it."
+                        is com.guardian.safety.billing.ProState.Error ->
+                            state.message + " Nothing has been charged. Every safety feature still works."
+                        is com.guardian.safety.billing.ProState.Inactive ->
+                            "Guardian Pro supports development and unlocks nothing that is needed in an emergency: " +
+                                "SOS, contacts, location alerts and evidence all stay free."
+                        com.guardian.safety.billing.ProState.Unknown -> "Checking your subscription..."
+                    },
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onRestore) { Text("Restore purchases", color = AccentPurple) }
+                    if (state !is com.guardian.safety.billing.ProState.NotConfigured &&
+                        state !is com.guardian.safety.billing.ProState.Active
+                    ) {
+                        if (onPurchase != null) {
+                            TextButton(onClick = onPurchase) { Text("Subscribe", color = SuccessGreen) }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close", color = TextSecondary) } },
+    )
 }

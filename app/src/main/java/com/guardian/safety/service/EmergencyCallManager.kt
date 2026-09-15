@@ -21,8 +21,22 @@ object EmergencyCallManager {
 
     private const val TAG = "EmergencyCallManager"
 
-    /** Emergency services number for the device's current locale. */
-    fun emergencyNumber(context: Context): String = "112"
+    /** Emergency services number for the device's current network/locale. */
+    fun emergencyNumber(context: Context): String = EmergencyNumbers.primary(context)
+
+    /**
+     * True when the app may place a call itself (`CALL_PHONE` granted). When this
+     * is false the dialler is opened instead and the caller must report that as
+     * "action needed", never as a completed call.
+     */
+    fun canPlaceCalls(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** True when the device has telephony at all. */
+    fun hasTelephony(context: Context): Boolean =
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_CALLING) ||
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
 
     /**
      * Calls [phoneNumber]. Falls back to the dialer when the app is not allowed to
@@ -34,14 +48,11 @@ object EmergencyCallManager {
         if (normalized.isBlank()) {
             return EmergencyActionResult.Failed("No phone number is available for this emergency contact.")
         }
-        if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_CALLING)
-            && !context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
-        ) {
+        if (!hasTelephony(context)) {
             return EmergencyActionResult.Failed("This device cannot place phone calls.")
         }
 
-        val canCallDirectly = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) ==
-            PackageManager.PERMISSION_GRANTED
+        val canCallDirectly = canPlaceCalls(context)
         val uri = Uri.fromParts("tel", normalized, null)
 
         if (canCallDirectly) {
