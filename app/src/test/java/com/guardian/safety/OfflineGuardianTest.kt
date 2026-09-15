@@ -111,7 +111,8 @@ class OfflineGuardianTest {
 
         // With no backend configured every attempt fails, so nothing may flip to SYNCED.
         val synced = sosManager.trySyncQueue()
-        assertEquals(0, synced)
+        assertEquals(1, synced.attempted)
+        assertEquals(0, synced.uploaded)
 
         val afterAttempt = repository.getPendingSosQueue()
         assertEquals(1, afterAttempt.size)

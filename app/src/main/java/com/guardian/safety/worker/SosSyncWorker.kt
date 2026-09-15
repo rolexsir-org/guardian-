@@ -32,10 +32,10 @@ class SosSyncWorker(
         }
 
         return try {
-            val synced = container.sosEmergencyManager.trySyncQueue()
+            val outcome = container.sosEmergencyManager.trySyncQueue()
             val sharedLocations = container.locationSyncCoordinator.flushPending()
 
-            if (synced == 0 && sharedLocations == 0) {
+            if (outcome.uploaded == 0 && sharedLocations == 0) {
                 val pending = container.repository.getPendingSosQueue()
                 val retryable = pending.any { it.syncStatus == "PENDING" || it.syncStatus == "SYNCING" }
                 if (retryable) {
@@ -45,7 +45,10 @@ class SosSyncWorker(
                     Result.success(workDataOfReason("Nothing left to sync."))
                 }
             } else {
-                Log.i(TAG, "Emergency sync complete: $synced emergency event(s), $sharedLocations location(s).")
+                Log.i(
+                    TAG,
+                    "Emergency sync complete: ${outcome.uploaded} emergency event(s), $sharedLocations location(s).",
+                )
                 Result.success()
             }
         } catch (error: Exception) {
@@ -61,6 +64,13 @@ class SosSyncWorker(
     companion object {
         const val TAG = "SosSyncWorker"
         const val UNIQUE_WORK_NAME = "guardian_sos_sync"
+
+        /**
+         * Separate name for the on-demand run scheduled the moment an emergency is
+         * triggered. It must not collide with [UNIQUE_WORK_NAME], which is the
+         * periodic sync — reusing that name would cancel the periodic schedule.
+         */
+        const val URGENT_WORK_NAME = "guardian_sos_sync_urgent"
         const val KEY_REASON = "reason"
         const val BASE_BACKOFF_SECONDS = 10L
     }

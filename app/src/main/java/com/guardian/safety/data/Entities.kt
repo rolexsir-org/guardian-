@@ -37,6 +37,12 @@ data class IncidentEntity(
     /** PENDING, SYNCED, FAILED — never set to SYNCED without a server acknowledgement. */
     val syncStatus: String = "PENDING",
     val lastError: String? = null,
+    /**
+     * User id of the Guardian member the server says filed this report. Null for
+     * reports created on this device before they sync — the UI must not invent an
+     * author.
+     */
+    val reportedBy: String? = null,
 )
 
 @Entity(

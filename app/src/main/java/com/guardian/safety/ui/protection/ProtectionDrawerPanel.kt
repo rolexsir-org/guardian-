@@ -49,6 +49,9 @@ fun ProtectionDrawerPanel(
     val audioBlackboxEnabled by viewModel.isAudioBlackboxEnabled.collectAsState()
     val biometricLockEnabled by viewModel.isBiometricLockEnabled.collectAsState()
     val incognitoModeEnabled by viewModel.isIncognitoModeEnabled.collectAsState()
+    // Whether the recorder is really capturing audio, and why not if it is not.
+    val isAudioRecording by viewModel.isAudioBlackboxRecording.collectAsState()
+    val audioRecorderError by viewModel.audioBlackboxError.collectAsState()
 
     AnimatedVisibility(
         visible = isOpen,
@@ -261,6 +264,21 @@ fun ProtectionDrawerPanel(
                                     checked = audioBlackboxEnabled,
                                     onCheckedChange = { viewModel.toggleAudioBlackbox(it) }
                                 )
+                                // The switch alone does not prove anything is being
+                                // recorded. Without the microphone permission, or
+                                // after a recorder failure, the user is told.
+                                if (audioBlackboxEnabled) {
+                                    Text(
+                                        text = if (isAudioRecording) {
+                                            "Recording now. The newest 5 minutes are kept on this device."
+                                        } else {
+                                            audioRecorderError ?: "Recording has not started yet."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isAudioRecording) SuccessGreen else WarningYellow,
+                                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
+                                    )
+                                }
                             }
                         }
 

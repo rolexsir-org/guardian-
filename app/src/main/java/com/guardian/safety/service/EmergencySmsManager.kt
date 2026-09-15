@@ -42,6 +42,15 @@ object EmergencySmsManager {
     private const val TAG = "EmergencySmsManager"
     private const val EXTRA_PHONE = "com.guardian.safety.extra.SMS_PHONE"
 
+    /**
+     * True when the app may send an SMS itself (`SEND_SMS` granted). When this is
+     * false the messaging app is opened with the draft and the caller must report
+     * "action needed" — never "sent".
+     */
+    fun canSendSms(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+
     /** Delivery results for messages this process sent, keyed by phone number. */
     private val _deliveries = MutableStateFlow<Map<String, SmsDelivery>>(emptyMap())
     val deliveries: StateFlow<Map<String, SmsDelivery>> = _deliveries.asStateFlow()

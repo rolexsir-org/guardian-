@@ -35,7 +35,7 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
     var emergencyNotes by remember { mutableStateOf("") }
     var doctorContact by remember { mutableStateOf("") }
     var insuranceInfo by remember { mutableStateOf("") }
-    var saveSuccess by remember { mutableStateOf(false) }
+    val saveState by viewModel.medicalSaveState.collectAsState()
 
     // Populate fields when medicalProfile loads
     LaunchedEffect(medicalProfile) {
@@ -238,15 +238,30 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
                         modifier = Modifier.fillMaxWidth().testTag("medical_insurance_input")
                     )
 
-                    if (saveSuccess) {
-                        Text(
-                            "Medical profile successfully encrypted & saved!",
+                    when (saveState) {
+                        is com.guardian.safety.ui.MedicalSaveState.Saving -> Text(
+                            "Encrypting and saving...",
                             color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.bodyMedium
                         )
+                        // The confirmation only appears after the write has really
+                        // happened. A failed write shows why, and the button stays
+                        // enabled so the user can try again.
+                        is com.guardian.safety.ui.MedicalSaveState.Saved -> Text(
+                            "Medical profile encrypted and saved on this device.",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        is com.guardian.safety.ui.MedicalSaveState.Failed -> Text(
+                            saveState.message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        else -> Unit
                     }
 
                     Button(
+                        enabled = saveState !is com.guardian.safety.ui.MedicalSaveState.Saving,
                         onClick = {
                             viewModel.updateMedicalProfile(
                                 name = name,
@@ -258,7 +273,6 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
                                 doctorContact = doctorContact,
                                 insuranceInfo = insuranceInfo
                             )
-                            saveSuccess = true
                         },
                         modifier = Modifier
                             .fillMaxWidth()

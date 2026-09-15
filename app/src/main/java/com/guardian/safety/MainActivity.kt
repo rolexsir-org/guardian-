@@ -15,7 +15,7 @@ import androidx.fragment.app.FragmentActivity
 import com.guardian.safety.ui.GuardianApp
 import com.guardian.safety.ui.GuardianViewModel
 import com.guardian.safety.ui.GuardianViewModelFactory
-import com.guardian.safety.ui.theme.MyApplicationTheme
+import com.guardian.safety.ui.theme.GuardianTheme
 
 class MainActivity : FragmentActivity() {
 
@@ -34,7 +34,7 @@ class MainActivity : FragmentActivity() {
         createNotificationChannel()
 
         setContent {
-            MyApplicationTheme {
+            GuardianTheme {
                 GuardianApp(viewModel = viewModel)
             }
         }

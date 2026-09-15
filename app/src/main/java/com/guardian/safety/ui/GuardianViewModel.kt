@@ -1,5 +1,6 @@
 package com.guardian.safety.ui
 
+import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.location.Location
@@ -9,6 +10,9 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.guardian.safety.AppContainer
+import com.guardian.safety.billing.ProState
+import com.guardian.safety.billing.PurchaseOutcome
+import com.guardian.safety.billing.RestoreOutcome
 import com.guardian.safety.data.AuditLogEntity
 import com.guardian.safety.data.CheckinEntity
 import com.guardian.safety.data.ContactEntity
@@ -21,16 +25,23 @@ import com.guardian.safety.data.SafeZoneEntity
 import com.guardian.safety.data.SosQueueEntity
 import com.guardian.safety.remote.ApiError
 import com.guardian.safety.remote.ApiResult
+import com.guardian.safety.remote.model.RealtimePresenceDto
 import com.guardian.safety.remote.model.SosEventDto
 import com.guardian.safety.service.EmergencyActionResult
+import com.guardian.safety.service.EmergencyCallManager
 import com.guardian.safety.service.EmergencySmsManager
 import com.guardian.safety.service.LocationFailure
 import com.guardian.safety.service.LocationService
+import com.guardian.safety.service.RecordingStart
+import com.guardian.safety.service.SecureStorageUnavailableException
+import com.guardian.safety.service.SensorSafetyMonitor
 import com.guardian.safety.service.SmsDelivery
 import com.guardian.safety.service.SosStage
 import com.guardian.safety.service.SosStatus
 import com.guardian.safety.service.SessionState
 import com.guardian.safety.service.TokenManager
+import com.guardian.safety.service.VoiceEmergencyManager
+import com.revenuecat.purchases.Offerings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -71,19 +82,51 @@ sealed interface DataState {
         DataState
 }
 
+/** What actually happened when the medical form was saved. Never assumed to succeed. */
+sealed interface MedicalSaveState {
+    data object Idle : MedicalSaveState
+    data object Saving : MedicalSaveState
+    data class Saved(val at: Long) : MedicalSaveState
+    data class Failed(val message: String) : MedicalSaveState
+}
+
+/**
+ * What a safety-event card or map pin needs. Screens depend on this shape rather
+ * than on the Room entity so a locally recorded report and a server report can be
+ * rendered identically.
+ */
+interface SafetyEventUi {
+    val id: String
+    val title: String
+    val category: String
+    val severity: String
+    val description: String
+    val latitude: Double?
+    val longitude: Double?
+    val timestamp: Long
+    val upvotes: Int
+
+    /**
+     * Who filed the report. Null when the device does not know — the UI must show
+     * "this device" or omit the attribution rather than invent an author.
+     */
+    val reportedBy: String?
+}
+
 /** A community safety event as shown on the map and in the incident list. */
 data class SafetyEventItem(
-    val id: String,
-    val title: String,
-    val category: String,
-    val severity: String,
-    val description: String,
-    val latitude: Double?,
-    val longitude: Double?,
-    val timestamp: Long,
-    val upvotes: Int,
+    override val id: String,
+    override val title: String,
+    override val category: String,
+    override val severity: String,
+    override val description: String,
+    override val latitude: Double?,
+    override val longitude: Double?,
+    override val timestamp: Long,
+    override val upvotes: Int,
     val localId: Long? = null,
-)
+    override val reportedBy: String? = null,
+) : SafetyEventUi
 
 /**
  * The single view model behind every screen.
@@ -107,6 +150,27 @@ class GuardianViewModel(
     private val locationService = container.locationService
     private val preferences = container.securePreferences
     private val scope get() = viewModelScope
+
+    /**
+     * Motion triggers. Callbacks run an emergency with the trigger that fired, so
+     * the audit trail and the alert say why it went off.
+     */
+    private val sensorMonitor = SensorSafetyMonitor(
+        context = getApplication(),
+        onFallDetected = { triggerSos(TRIGGER_FALL) },
+        onCrashDetected = { triggerSos(TRIGGER_CRASH) },
+        onShakeDetected = { triggerSos(TRIGGER_SHAKE) },
+    )
+
+    /** Hands-free emergency detection. Reports its own failures to the UI. */
+    private val voiceEmergencyManager = VoiceEmergencyManager(
+        context = getApplication(),
+        onEmergencyDetected = { _, classification, advice ->
+            _safetyAdvisory.value = advice
+            triggerSos(TRIGGER_VOICE)
+            _dataState.value = DataState.Success("Voice emergency detected ($classification). Guardian is alerting your circle.")
+        },
+    )
 
     // ------------------------------------------------------------------- session
 
@@ -249,6 +313,7 @@ class GuardianViewModel(
                 timestamp = row.timestamp,
                 upvotes = row.upvotes,
                 localId = row.id,
+                reportedBy = row.reportedBy,
             )
         }
     }.stateIn(scope, SharingStarted.Eagerly, emptyList())
@@ -260,6 +325,9 @@ class GuardianViewModel(
     val activeSosEvents: StateFlow<List<SosEventDto>> = container.realtimeClient.activeSos
 
     val realtimeState = container.realtimeClient.state
+
+    /** Live presence for the signed-in user's scope, straight from the Durable Object. */
+    val presence: StateFlow<List<RealtimePresenceDto>> = container.realtimeClient.presence
 
     // ----------------------------------------------------------------- location
 
@@ -495,6 +563,11 @@ class GuardianViewModel(
 
     val isCloudConfigured: Boolean = container.isCloudConfigured
     val cloudConfigurationError: String? = container.configurationError
+
+    /** Same information under the name the sign-in screen uses. */
+    val isBackendConfigured: Boolean get() = container.isCloudConfigured
+    val backendConfigurationError: String? get() = container.configurationError
+
     val secureStorageError: String? = container.secureStorageError
     val databaseRecoveryNotice: String? = container.databaseRecoveryNotice
 
@@ -851,6 +924,280 @@ class GuardianViewModel(
         }
     }
 
+    /**
+     * Saves the medical form. The confirmation the screen shows comes from this
+     * result — the write has actually happened (or the real failure is reported)
+     * before the UI says anything.
+     */
+    private val _medicalSaveState = MutableStateFlow<MedicalSaveState>(MedicalSaveState.Idle)
+    val medicalSaveState: StateFlow<MedicalSaveState> = _medicalSaveState.asStateFlow()
+
+    fun updateMedicalProfile(
+        name: String,
+        bloodGroup: String,
+        allergies: String,
+        medicalConditions: String,
+        medications: String,
+        emergencyNotes: String,
+        doctorContact: String,
+        insuranceInfo: String,
+    ) {
+        scope.launch {
+            _medicalSaveState.value = MedicalSaveState.Saving
+            runCatching {
+                repository.saveMedicalProfile(
+                    MedicalProfileEntity(
+                        id = medicalProfile.value?.id ?: 1L,
+                        name = name.trim(),
+                        bloodGroup = bloodGroup.trim(),
+                        allergies = allergies.trim(),
+                        medicalConditions = medicalConditions.trim(),
+                        medications = medications.trim(),
+                        emergencyNotes = emergencyNotes.trim(),
+                        doctorContact = doctorContact.trim(),
+                        insuranceInfo = insuranceInfo.trim(),
+                    ),
+                )
+            }.onSuccess {
+                _medicalSaveState.value = MedicalSaveState.Saved(System.currentTimeMillis())
+            }.onFailure { error ->
+                _medicalSaveState.value = MedicalSaveState.Failed(
+                    when (error) {
+                        is SecureStorageUnavailableException ->
+                            "This device cannot open its encrypted key store, so the medical profile was not saved."
+                        else -> error.message ?: "The medical profile could not be written (${error.javaClass.simpleName})."
+                    },
+                )
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- check-ins
+
+    /** Completes (or re-statuses) a check-in through the same path as the timer UI. */
+    fun updateCheckinStatus(checkin: CheckinEntity, status: String) = completeCheckin(checkin.id, status)
+
+    // ------------------------------------------------------------ safe zones
+
+    /**
+     * Adds a safe zone anchored to a real fix. The caller must already hold a
+     * location; a zone with invented coordinates would be worse than no zone.
+     */
+    fun addSafeZone(name: String, latitude: Double, longitude: Double, radius: Float, type: String) {
+        scope.launch {
+            _dataState.value = DataState.Loading
+            val id = repository.addSafeZone(
+                SafeZoneEntity(
+                    name = name.trim(),
+                    latitude = latitude,
+                    longitude = longitude,
+                    radiusMeters = radius.takeIf { it > 0f } ?: DEFAULT_ZONE_RADIUS_METERS,
+                    zoneType = type.uppercase(),
+                ),
+            )
+            _dataState.value = if (id > 0) {
+                DataState.Success("Safe zone '${name.trim()}' saved on this device.")
+            } else {
+                DataState.Failure("The safe zone could not be saved on this device.")
+            }
+        }
+    }
+
+    fun deleteSafeZone(zone: SafeZoneEntity) {
+        scope.launch {
+            repository.deleteSafeZone(zone)
+            _dataState.value = DataState.Success("Safe zone '${zone.name}' removed.")
+        }
+    }
+
+    // -------------------------------------------------------- parental limits
+
+    /**
+     * Stores the daily limit for a tracked app.
+     *
+     * Guardian does not read other apps' usage and cannot make Android enforce a
+     * limit, so this is a record of the rule the family agreed — it is saved and
+     * reported honestly rather than being presented as enforced screen time.
+     */
+    fun updateAppLimit(appId: Long, dailyLimitMinutes: Int, restricted: Boolean) {
+        scope.launch {
+            val current = appUsage.value.firstOrNull { it.appId == appId }
+            if (current == null) {
+                _dataState.value = DataState.Failure("That app entry is no longer on this device.")
+                return@launch
+            }
+            repository.updateAppUsage(
+                current.copy(
+                    dailyLimitMinutes = dailyLimitMinutes.coerceIn(0, MAX_APP_LIMIT_MINUTES),
+                    isRestricted = restricted,
+                ),
+            )
+            _dataState.value = DataState.Success("Limit saved for ${current.appName}.")
+        }
+    }
+
+    // -------------------------------------------------------- incident alerts
+
+    /** Category → subscribed, for the notification settings dialog. */
+    private val _incidentSubscriptions = MutableStateFlow(preferences.incidentSubscriptions(INCIDENT_CATEGORIES))
+    val incidentSubscriptions: StateFlow<Map<String, Boolean>> = _incidentSubscriptions.asStateFlow()
+
+    fun toggleIncidentSubscription(category: String, subscribed: Boolean) {
+        scope.launch {
+            runCatching { preferences.setIncidentSubscribed(category, subscribed) }
+                .onSuccess {
+                    _incidentSubscriptions.value = preferences.incidentSubscriptions(INCIDENT_CATEGORIES)
+                    _dataState.value = DataState.Success(
+                        if (subscribed) "You will be alerted about $category reports." else "$category alerts are off.",
+                    )
+                }
+                .onFailure {
+                    _dataState.value = DataState.Failure("That setting could not be saved on this device.")
+                }
+        }
+    }
+
+    // ------------------------------------------------------- community alerts
+
+    /** Confirms you are responding to a nearby SOS. Server-authoritative. */
+    fun acknowledgeSos(sosId: String) {
+        scope.launch {
+            _dataState.value = DataState.Loading
+            when (val result = repository.acknowledgeSos(sosId)) {
+                is ApiResult.Success ->
+                    _dataState.value = DataState.Success("You are marked as responding. Please help if you safely can.")
+                is ApiResult.Failure -> _dataState.value = DataState.Failure(
+                    message = result.error.message,
+                    offline = result.error.offline,
+                )
+            }
+        }
+    }
+
+    // --------------------------------------------------------- safety advisory
+
+    private val _safetyAdvisory = MutableStateFlow("")
+    val safetyAdvisory: StateFlow<String> = _safetyAdvisory.asStateFlow()
+
+    /**
+     * Builds a recommendation from the device's real state: permissions, contacts,
+     * backend reachability. Never a canned "you are safe".
+     */
+    fun refreshSafetyAdvisory() {
+        scope.launch {
+            runSafetySelfCheck()
+            _safetyAdvisory.value = buildSafetyAdvisory()
+        }
+    }
+
+    private suspend fun buildSafetyAdvisory(): String {
+        if (!locationService.hasLocationPermission()) {
+            return "Grant location permission so an emergency alert can include where you are. " +
+                "Without it, responders get an alert with no coordinates."
+        }
+        if (!locationService.areProvidersEnabled()) {
+            return "Location services are switched off. Turn them on so Guardian can find you in an emergency."
+        }
+        val contacts = repository.getAllContactsOnce()
+        if (contacts.isEmpty()) {
+            return "Add at least one emergency contact. Right now an SOS can call for help but cannot tell anyone you know."
+        }
+        if (!EmergencyCallManager.canPlaceCalls(getApplication())) {
+            return "Guardian cannot place a call by itself yet. Grant the phone permission, or expect to press call in the dialler."
+        }
+        if (!EmergencySmsManager.canSendSms(getApplication())) {
+            return "Alert messages need one confirmation tap in your messaging app. Grant SMS permission to send them automatically."
+        }
+        if (!container.isCloudConfigured) {
+            return "This build has no Guardian service configured, so alerts stay on this device and your family is not notified remotely."
+        }
+        if (sessionManager.currentSession() == null) {
+            return "Sign in so your alerts reach your family through the Guardian service."
+        }
+        val pending = repository.getPendingSosQueue().size
+        if (pending > 0) {
+            return "$pending emergency record(s) are still waiting to sync. They will be sent as soon as there is a connection."
+        }
+        return "Your emergency setup is complete: location, contacts, calling, messaging and the Guardian service are all ready."
+    }
+
+    // ------------------------------------------------------------- voice SOS
+
+    /**
+     * Arms hands-free voice detection.
+     *
+     * Fails visibly: without a recognition service or without microphone
+     * permission the user is told, and the switch does not pretend to be on.
+     */
+    fun startVoiceDetection() {
+        if (!preferences.isVoiceActivationEnabled()) {
+            _dataState.value = DataState.Failure("Turn on Voice Sentinel before using voice SOS.")
+            return
+        }
+        voiceEmergencyManager.startListening { reason -> _dataState.value = DataState.Failure(reason) }
+    }
+
+    /**
+     * The "Voice SOS" button.
+     *
+     * Guardian does not claim to have heard anything: it arms detection and says
+     * exactly what will happen next, or reports why it cannot.
+     */
+    fun triggerVoiceSos() {
+        if (!preferences.isVoiceActivationEnabled()) {
+            _dataState.value = DataState.Failure(
+                "Voice Sentinel is off. Enable it in Protection → Automated Protection, then say \"help me\" or \"emergency\".",
+            )
+            return
+        }
+        startVoiceDetection()
+        _dataState.value = DataState.Success(
+            if (_dataState.value is DataState.Failure) {
+                (_dataState.value as DataState.Failure).message
+            } else {
+                "Listening for an emergency phrase. Say \"help me\" or \"emergency\"."
+            },
+        )
+    }
+
+    // ----------------------------------------------------------- Guardian Pro
+
+    val proState: StateFlow<ProState> = container.subscriptionManager.state
+    val proOfferings: StateFlow<Offerings?> = container.subscriptionManager.offerings
+
+    fun refreshProState() {
+        scope.launch { container.subscriptionManager.refresh() }
+    }
+
+    /** Starts a Guardian Pro purchase. Requires a visible activity for the store sheet. */
+    fun purchasePro(activity: Activity) {
+        scope.launch {
+            _dataState.value = DataState.Loading
+            _dataState.value = when (val outcome = container.subscriptionManager.purchase(activity)) {
+                is PurchaseOutcome.Success ->
+                    DataState.Success("Guardian Pro is active. Thank you for supporting Guardian.")
+                is PurchaseOutcome.CancelledByUser ->
+                    DataState.Success("Purchase cancelled. Nothing was charged.")
+                is PurchaseOutcome.Failed -> DataState.Failure(outcome.message)
+            }
+        }
+    }
+
+    fun restoreProPurchases() {
+        scope.launch {
+            _dataState.value = DataState.Loading
+            _dataState.value = when (val outcome = container.subscriptionManager.restore()) {
+                is RestoreOutcome.Restored ->
+                    if (outcome.active) {
+                        DataState.Success("Guardian Pro restored on this device.")
+                    } else {
+                        DataState.Failure("No Guardian Pro purchase was found for this account.")
+                    }
+                is RestoreOutcome.Failed -> DataState.Failure(outcome.message)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------- safety
 
     fun setEmergencyContactDeliveryEnabled(enabled: Boolean) {
@@ -864,12 +1211,28 @@ class GuardianViewModel(
     val isLiveGpsEnabled: StateFlow<Boolean> = preferences.isLiveGpsEnabledFlow()
     val isVoiceActivationEnabled: StateFlow<Boolean> = preferences.isVoiceActivationEnabledFlow()
     val isFallDetectionEnabled: StateFlow<Boolean> = preferences.isFallDetectionEnabledFlow()
+
+    /** "Fall Guard" in the protection panel is the fall-detection flag. */
+    val isFallGuardEnabled: StateFlow<Boolean> = preferences.isFallDetectionEnabledFlow()
+    val isCrashSosEnabled: StateFlow<Boolean> = preferences.isCrashSosEnabledFlow()
     val isShakeGestureEnabled: StateFlow<Boolean> = preferences.isShakeGestureEnabledFlow()
+    val isAutoSosSilenceEnabled: StateFlow<Boolean> = preferences.isAutoSosSilenceEnabledFlow()
     val isBackgroundMonitoringEnabled: StateFlow<Boolean> = preferences.isBackgroundMonitoringEnabledFlow()
+    val isGuardianProximityEnabled: StateFlow<Boolean> = preferences.isGuardianProximityEnabledFlow()
+    val isCloudRecordEnabled: StateFlow<Boolean> = preferences.isCloudRecordEnabledFlow()
+    val isAudioBlackboxEnabled: StateFlow<Boolean> = preferences.isAudioBlackboxEnabledFlow()
     val isIncognitoModeEnabled: StateFlow<Boolean> = preferences.isIncognitoModeEnabledFlow()
     val isBiometricLockEnabled: StateFlow<Boolean> = preferences.isBiometricLockEnabledFlow()
     val isStudyModeEnabled: StateFlow<Boolean> = preferences.isStudyModeEnabledFlow()
     val isBedtimeScheduleEnabled: StateFlow<Boolean> = preferences.isBedtimeScheduleEnabledFlow()
+
+    /**
+     * Whether the microphone is actually recording right now. The switch in the
+     * protection panel is only half the story: without `RECORD_AUDIO` the recorder
+     * cannot run, and the UI must say so.
+     */
+    val isAudioBlackboxRecording: StateFlow<Boolean> = container.audioBlackbox.isRecording
+    val audioBlackboxError: StateFlow<String?> = container.audioBlackbox.lastError
 
     fun toggleLiveGps(enabled: Boolean) = updatePreference("live location") {
         preferences.setLiveGpsEnabled(enabled)
@@ -881,14 +1244,66 @@ class GuardianViewModel(
 
     fun toggleFallDetection(enabled: Boolean) = updatePreference("fall detection") {
         preferences.setFallDetectionEnabled(enabled)
+        applySensorConfiguration()
+    }
+
+    fun toggleFallGuard(enabled: Boolean) = toggleFallDetection(enabled)
+
+    fun toggleCrashSos(enabled: Boolean) = updatePreference("crash SOS") {
+        preferences.setCrashSosEnabled(enabled)
+        applySensorConfiguration()
     }
 
     fun toggleShakeGesture(enabled: Boolean) = updatePreference("shake gesture") {
         preferences.setShakeGestureEnabled(enabled)
+        applySensorConfiguration()
+    }
+
+    fun toggleAutoSosSilence(enabled: Boolean) = updatePreference("auto SOS silence") {
+        preferences.setAutoSosSilenceEnabled(enabled)
     }
 
     fun toggleBackgroundMonitoring(enabled: Boolean) = updatePreference("background monitoring") {
         preferences.setBackgroundMonitoringEnabled(enabled)
+        if (enabled && container.isCloudConfigured) {
+            container.scheduleBackgroundWork()
+            container.userPresenceService.start { container.batteryLevel() }
+        } else {
+            container.userPresenceService.stop()
+        }
+    }
+
+    fun toggleGuardianProximity(enabled: Boolean) = updatePreference("guardian proximity") {
+        preferences.setGuardianProximityEnabled(enabled)
+    }
+
+    /**
+     * Evidence upload during an emergency. Enabling it does not upload anything by
+     * itself: recordings are attached when an emergency is triggered, and the
+     * result of each upload is reported.
+     */
+    fun toggleCloudRecord(enabled: Boolean) = updatePreference("cloud evidence vault") {
+        preferences.setCloudRecordEnabled(enabled)
+    }
+
+    /**
+     * Rolling audio buffer.
+     *
+     * Switching it on without microphone permission does not silently "enable"
+     * anything: the recorder reports the denial and the message is surfaced.
+     */
+    fun toggleAudioBlackbox(enabled: Boolean) = updatePreference("audio blackbox") {
+        preferences.setAudioBlackboxEnabled(enabled)
+        if (enabled) {
+            when (val outcome = container.audioBlackbox.start()) {
+                is RecordingStart.Started -> Unit
+                is RecordingStart.PermissionDenied ->
+                    error("Microphone permission is required before Guardian can record an audio blackbox.")
+                is RecordingStart.Failed -> error(outcome.message)
+            }
+        } else {
+            container.audioBlackbox.stop()
+        }
     }
 
     fun toggleIncognitoMode(enabled: Boolean) = updatePreference("incognito mode") {
@@ -907,16 +1322,52 @@ class GuardianViewModel(
         preferences.setBedtimeScheduleEnabled(enabled)
     }
 
+    /**
+     * Persists a setting and reports what really happened.
+     *
+     * A setting is only reported as updated after it has been written. A failure
+     * keeps the real reason: encrypted storage being unavailable is the common
+     * case, but a permission or device failure must be shown as itself rather than
+     * being mislabelled.
+     */
     private fun updatePreference(label: String, block: () -> Unit) {
         scope.launch {
             runCatching { block() }
                 .onSuccess { _dataState.value = DataState.Success("$label updated.") }
-                .onFailure {
-                    _dataState.value = DataState.Failure(
-                        "Could not save the $label setting: encrypted storage is unavailable.",
-                    )
+                .onFailure { error ->
+                    val detail = when (error) {
+                        is SecureStorageUnavailableException ->
+                            "Could not save the $label setting: encrypted storage is unavailable on this device."
+                        is IllegalStateException -> error.message ?: "Could not change the $label setting."
+                        else -> "Could not change the $label setting (${error.javaClass.simpleName})."
+                    }
+                    _dataState.value = DataState.Failure(detail)
                 }
         }
+    }
+
+    /**
+     * Applies the current motion-trigger toggles to the sensor listener.
+     *
+     * If the device has no accelerometer, or nothing is switched on, the monitor is
+     * stopped and the user is told — the switches never imply protection that the
+     * hardware cannot provide.
+     */
+    private fun applySensorConfiguration() {
+        val started = sensorMonitor.startMonitoring(
+            fallGuardEnabled = preferences.isFallDetectionEnabled(),
+            crashSosEnabled = preferences.isCrashSosEnabled(),
+            shakeGestureEnabled = preferences.isShakeGestureEnabled(),
+        )
+        if (started) return
+        val anyEnabled = preferences.isFallDetectionEnabled() ||
+            preferences.isCrashSosEnabled() ||
+            preferences.isShakeGestureEnabled()
+        if (!anyEnabled) return
+        _dataState.value = DataState.Failure(
+            sensorMonitor.unavailabilityReason
+                ?: "Motion triggers could not be started on this device.",
+        )
     }
 
     // -------------------------------------------------------------------- system
@@ -947,8 +1398,15 @@ class GuardianViewModel(
 
     private fun startSignedInWork() {
         val session = sessionManager.currentSession() ?: return
-        container.userPresenceService.start()
+        container.userPresenceService.start { container.batteryLevel() }
         container.realtimeClient.subscribe(groupRealtimePath())
+        applySensorConfiguration()
+        // Subscriptions follow the Guardian identity so purchases stay attached to
+        // the account rather than to an anonymous device id.
+        scope.launch {
+            container.subscriptionManager.signIn(session.userId)?.let { Log.w(TAG, "Billing identity: $it") }
+            container.subscriptionManager.refresh()
+        }
         refreshAll()
         Log.i(TAG, "Session active for user ${'$'}{session.userId.take(8)}")
     }
@@ -958,6 +1416,9 @@ class GuardianViewModel(
         signedInJob = null
         container.userPresenceService.stop()
         container.realtimeClient.close()
+        sensorMonitor.stopMonitoring()
+        voiceEmergencyManager.stopListening()
+        scope.launch { container.subscriptionManager.signOut() }
     }
 
     private fun groupRealtimePath(): String {
@@ -993,11 +1454,23 @@ class GuardianViewModel(
     override fun onCleared() {
         super.onCleared()
         stopSignedInWork()
+        // Never leave the microphone or a sensor listener registered behind.
+        container.audioBlackbox.release()
+        sensorMonitor.stopMonitoring()
     }
 
     private companion object {
         const val TAG = "GuardianViewModel"
         const val SOS_LOCATION_TIMEOUT_MS = 4_000L
+        const val TRIGGER_FALL = "FALL"
+        const val TRIGGER_CRASH = "CRASH"
+        const val TRIGGER_SHAKE = "SHAKE"
+        const val TRIGGER_VOICE = "VOICE"
+        const val DEFAULT_ZONE_RADIUS_METERS = 150f
+        const val MAX_APP_LIMIT_MINUTES = 24 * 60
+
+        /** Categories the community feed can alert on. Matches the report dialog. */
+        val INCIDENT_CATEGORIES = listOf("Crime", "Hazard", "Weather", "Medical", "SOS", "Community")
         const val REFRESH_LOCATION_TIMEOUT_MS = 8_000L
         const val REPORT_LOCATION_TIMEOUT_MS = 6_000L
 
