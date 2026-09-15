@@ -33,7 +33,7 @@ private val LightColorScheme =
   )
 
 @Composable
-fun MyApplicationTheme(
+fun GuardianTheme(
   darkTheme: Boolean = true, // Default to Immersive Dark theme
   // Dynamic color is available on Android 12+
   dynamicColor: Boolean = false,
