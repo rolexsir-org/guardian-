@@ -97,7 +97,7 @@ interface GuardianDao {
     @Query("SELECT * FROM sos_queue WHERE clientEventId = :clientEventId LIMIT 1")
     suspend fun getSosByClientEventId(clientEventId: String): SosQueueEntity?
 
-    @Query("SELECT COUNT(*) FROM sos_queue WHERE syncStatus != 'SYNCED'")
+    @Query("SELECT COUNT(*) FROM sos_queue WHERE syncStatus NOT IN ('SYNCED', 'CANCELLED')")
     fun pendingSosCount(): Flow<Int>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -123,8 +123,17 @@ interface GuardianDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLocationCache(location: LocationCacheEntity): Long
 
-    @Query("DELETE FROM location_cache WHERE timestamp < :cutoffTimestamp")
-    suspend fun purgeOldLocations(cutoffTimestamp: Long)
+    /**
+     * Retention sweep. Fixes the server already accepted are dropped at
+     * [retentionCutoff]; fixes that never reached the server are kept until the
+     * longer [hardCutoff] so an offline period can still be replayed instead of
+     * being silently discarded. Returns the number of rows removed.
+     */
+    @Query(
+        "DELETE FROM location_cache WHERE " +
+            "(synced = 1 AND timestamp < :retentionCutoff) OR timestamp < :hardCutoff",
+    )
+    suspend fun purgeOldLocations(retentionCutoff: Long, hardCutoff: Long): Int
 
     // -------------------------------------------------------------- audit logs
 

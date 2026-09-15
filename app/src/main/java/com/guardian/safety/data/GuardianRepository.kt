@@ -78,6 +78,7 @@ class GuardianRepository(
                             upvotes = event.confirmations,
                             status = if (event.expiresAt > System.currentTimeMillis()) "Active" else "Resolved",
                             syncStatus = "SYNCED",
+                            reportedBy = event.reportedByUserId,
                         ),
                     )
                 }
@@ -484,6 +485,30 @@ class GuardianRepository(
         guardianDao.getPendingSosQueue()
     }
 
+    /**
+     * Emergencies that have never been accepted by the server. Excludes rows the
+     * user already cancelled so a cancelled alert is never re-sent.
+     */
+    suspend fun getUnsentSosQueue(): List<SosQueueEntity> = withContext(Dispatchers.IO) {
+        guardianDao.getUnsentSosQueue()
+    }
+
+    /**
+     * Marks an emergency cancelled on this device. The local row leaves the retry
+     * queue immediately; resolving the server-side copy is a separate, reported
+     * step (see [resolveSos]) because it needs a connection.
+     */
+    suspend fun markSosCancelled(sos: SosQueueEntity, note: String?) = withContext(Dispatchers.IO) {
+        guardianDao.updateSosQueue(
+            sos.copy(
+                emergencyStatus = CANCELLED_STATUS,
+                syncStatus = CANCELLED_STATUS,
+                lastError = note,
+                lastAttemptAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
     suspend fun insertSosQueue(sos: SosQueueEntity): Long = withContext(Dispatchers.IO) {
         guardianDao.insertSosQueue(sos)
     }
@@ -581,8 +606,19 @@ class GuardianRepository(
     /** True only when a real Worker URL is configured for this build. */
     fun isCloudConfigured(): Boolean = com.guardian.safety.remote.CloudConfig.configured
 
-    suspend fun purgeOldLocations() = withContext(Dispatchers.IO) {
-        guardianDao.purgeOldLocations(System.currentTimeMillis() - LOCATION_RETENTION_MS)
+    /**
+     * Applies local location retention and reports how many rows were removed.
+     *
+     * Synced fixes go after [LOCATION_RETENTION_MS]. Fixes that were never
+     * accepted by the server survive for [UNSYNCED_RETENTION_MS] so a device that
+     * has been offline for days can still send what it recorded.
+     */
+    suspend fun purgeOldLocations(): Int = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        guardianDao.purgeOldLocations(
+            retentionCutoff = now - LOCATION_RETENTION_MS,
+            hardCutoff = now - UNSYNCED_RETENTION_MS,
+        )
     }
 
     // -------------------------------------------------------------- audit trail
@@ -879,8 +915,10 @@ class GuardianRepository(
     }
 
     private companion object Constants {
+        const val CANCELLED_STATUS = "CANCELLED"
         const val DEFAULT_RADIUS_METERS = 5_000
         const val DEFAULT_TTL_MINUTES = 720
         const val LOCATION_RETENTION_MS = 7L * 24 * 60 * 60 * 1_000
+        const val UNSYNCED_RETENTION_MS = 14L * 24 * 60 * 60 * 1_000
     }
 }

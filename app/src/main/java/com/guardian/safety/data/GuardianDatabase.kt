@@ -1,7 +1,6 @@
 package com.guardian.safety.data
 
 import android.content.Context
-import android.util.Base64
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -9,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.guardian.safety.service.SecureEncryptedPreferences
 import com.guardian.safety.service.SecureStorageUnavailableException
-import net.sqlcipher.database.SQLiteDatabase
-import net.sqlcipher.database.SupportFactory
+import net.zetetic.database.sqlcipher.SQLiteDatabase
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import java.io.File
 import java.security.SecureRandom
 
@@ -21,6 +20,13 @@ import java.security.SecureRandom
  *   Android Keystore-backed encrypted preferences. There is no hard-coded key and
  *   no plaintext "fallback" database: if encrypted storage is unavailable the
  *   database refuses to open and the failure is surfaced in the UI.
+ * * Encryption uses **SQLCipher for Android** (`net.zetetic:sqlcipher-android`),
+ *   the supported successor to the end-of-life `android-database-sqlcipher`
+ *   Community Edition. The legacy package cannot be aligned to 16 KB ELF pages,
+ *   which Google Play requires for apps targeting Android 15+; SQLCipher for
+ *   Android has supported 16 KB pages since 4.6.1.
+ * * Write-ahead logging is enabled explicitly so a background sync can read while
+ *   the UI writes.
  * * Migrations are real: no destructive fallback. Development builds that still
  *   use the pre-1.0 constant passphrase are re-keyed in place (data preserved);
  *   if re-keying is impossible the old file is kept as a timestamped backup
@@ -41,7 +47,7 @@ import java.security.SecureRandom
         AppUsageEntity::class,
         FamilyMessageEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class GuardianDatabase : RoomDatabase() {
@@ -70,8 +76,15 @@ abstract class GuardianDatabase : RoomDatabase() {
             }
         }
 
+        /** Test seam: forget the singleton so the next call re-opens the database. */
+        fun resetForTesting() {
+            synchronized(this) { INSTANCE = null }
+        }
+
         private fun open(appContext: Context): GuardianDatabase {
-            SQLiteDatabase.loadLibs(appContext)
+            // SQLCipher for Android requires the native library to be loaded
+            // explicitly before any of its classes are used.
+            System.loadLibrary("sqlcipher")
             val passphrase = DatabaseKeyProvider.passphrase(appContext)
             val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
 
@@ -87,7 +100,7 @@ abstract class GuardianDatabase : RoomDatabase() {
             // The database exists but cannot be decrypted with the current key: it
             // is a pre-1.0 database. Re-key it in place so no data is lost.
             existing.close()
-            if (rekeyLegacyDatabase(appContext, databaseFile, passphrase)) {
+            if (rekeyLegacyDatabase(databaseFile, passphrase)) {
                 builder = databaseBuilder(appContext, passphrase)
                 val rekeyed = builder.build()
                 val retryError = runCatching { rekeyed.openHelper.writableDatabase }.exceptionOrNull()
@@ -100,7 +113,7 @@ abstract class GuardianDatabase : RoomDatabase() {
 
             // Re-keying failed. Never delete the user's data: quarantine the old
             // files and start a fresh encrypted database.
-            quarantineUnreadableDatabase(appContext, databaseFile)
+            quarantineUnreadableDatabase(databaseFile)
             recoveryNotice =
                 "The previous local database could not be decrypted on this device. A backup of it was kept in the app's files directory and a new encrypted database was created."
             return databaseBuilder(appContext, passphrase).build()
@@ -108,19 +121,24 @@ abstract class GuardianDatabase : RoomDatabase() {
 
         private fun databaseBuilder(appContext: Context, passphrase: ByteArray): Builder<GuardianDatabase> =
             Room.databaseBuilder(appContext, GuardianDatabase::class.java, DATABASE_NAME)
-                .openHelperFactory(SupportFactory(passphrase))
-                .addMigrations(MIGRATION_5_6)
+                .openHelperFactory(SupportOpenHelperFactory(passphrase, null, true))
+                .addMigrations(MIGRATION_5_6, MIGRATION_6_7)
 
-        private fun rekeyLegacyDatabase(appContext: Context, databaseFile: File, newPassphrase: ByteArray): Boolean {
+        /**
+         * Re-keys a database that is still protected by the pre-1.0 constant
+         * passphrase. Returns false (and leaves the file untouched) when the file
+         * cannot be opened with the legacy key.
+         */
+        private fun rekeyLegacyDatabase(databaseFile: File, newPassphrase: ByteArray): Boolean {
             return try {
                 val legacy = SQLiteDatabase.openOrCreateDatabase(
-                    databaseFile.absolutePath,
+                    databaseFile,
                     LEGACY_PASSPHRASE,
+                    null,
                     null,
                 )
                 try {
-                    val encoded = Base64.encodeToString(newPassphrase, Base64.NO_WRAP)
-                    legacy.rawExecSQL("PRAGMA rekey = '$encoded';")
+                    legacy.changePassword(newPassphrase)
                 } finally {
                     legacy.close()
                 }
@@ -131,7 +149,7 @@ abstract class GuardianDatabase : RoomDatabase() {
             }
         }
 
-        private fun quarantineUnreadableDatabase(appContext: Context, databaseFile: File) {
+        private fun quarantineUnreadableDatabase(databaseFile: File) {
             val stamp = System.currentTimeMillis()
             val directory = databaseFile.parentFile ?: return
             listOf("", "-wal", "-shm", "-journal").forEach { suffix ->
@@ -263,6 +281,17 @@ abstract class GuardianDatabase : RoomDatabase() {
                 )
                 db.execSQL("DROP TABLE family_messages")
                 db.execSQL("ALTER TABLE family_messages_new RENAME TO family_messages")
+            }
+        }
+
+        /**
+         * Version 6 → 7: keeps the identity of the Guardian member who reported a
+         * community safety event, so the map can attribute a report instead of
+         * showing an invented author.
+         */
+        val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE incidents ADD COLUMN reportedBy TEXT")
             }
         }
     }
