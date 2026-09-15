@@ -50,8 +50,13 @@
 -keep class androidx.room.** { *; }
 -keep @androidx.room.Entity class * { *; }
 -dontwarn androidx.room.paging.**
--keep class net.sqlcipher.** { *; }
--dontwarn net.sqlcipher.**
+# SQLCipher for Android. The JNI layer binds native callbacks by name, so the
+# public API must keep its class and member names.
+-keep class net.zetetic.database.** { *; }
+-dontwarn net.zetetic.database.**
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
 
 # ---------------------------------------------------------------------------
 # RevenueCat (subscriptions)

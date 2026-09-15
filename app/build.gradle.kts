@@ -4,7 +4,6 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.roborazzi)
 }
 
 /**
@@ -119,7 +118,6 @@ android {
 
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
@@ -137,16 +135,16 @@ dependencies {
   implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.androidx.security.crypto)
   implementation(libs.androidx.biometric)
-  implementation(libs.sqlcipher.android)
+  // SQLCipher for Android is published as an AAR-only artifact; `@aar` is the
+  // coordinate the vendor documents and avoids Gradle looking for a JAR.
+  implementation("${libs.sqlcipher.android}@aar")
   implementation(libs.androidx.sqlite)
-  implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  implementation(libs.play.services.location)
   implementation(libs.retrofit)
   // Subscriptions. Only the public SDK key is embedded; the entitlement id is
   // configuration, never a secret.
@@ -159,9 +157,6 @@ dependencies {
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.okhttp)
   testImplementation(libs.robolectric)
-  testImplementation(libs.roborazzi)
-  testImplementation(libs.roborazzi.compose)
-  testImplementation(libs.roborazzi.junit.rule)
 
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
