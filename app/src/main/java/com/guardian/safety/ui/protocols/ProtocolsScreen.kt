@@ -17,8 +17,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.guardian.safety.service.EmergencyActionResult
 import com.guardian.safety.service.EmergencyCallManager
 import com.guardian.safety.service.EmergencyNumbers
+import com.guardian.safety.service.describe
 import com.guardian.safety.service.HardwareAlertManager
 import com.guardian.safety.util.HapticUtils
 
@@ -30,7 +32,11 @@ data class ProtocolGuide(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProtocolsScreen(onBack: () -> Unit = {}) {
+fun ProtocolsScreen(
+    onBack: () -> Unit = {},
+    /** Reports a call that Android refused or handed to the dialler. */
+    onCallProblem: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val hardwareAlertManager = remember { HardwareAlertManager(context) }
     val emergencyNumber = remember(context) { EmergencyNumbers.primary(context) }
@@ -155,7 +161,14 @@ fun ProtocolsScreen(onBack: () -> Unit = {}) {
                                 IconButton(
                                     onClick = {
                                         HapticUtils.triggerHaptic(context, isHeavy = true)
-                                        EmergencyCallManager.callNumber(context, emergencyNumber)
+                                        // The result is never discarded: a dialler
+                                        // hand-off or a refusal is shown to the user
+                                        // rather than looking like a placed call.
+                                        val outcome =
+                                            EmergencyCallManager.callNumber(context, emergencyNumber)
+                                        if (outcome !is EmergencyActionResult.Dispatched) {
+                                            onCallProblem(outcome.describe())
+                                        }
                                     }
                                 ) {
                                     Icon(

@@ -218,7 +218,10 @@ private fun SignedInApp(viewModel: GuardianViewModel) {
                     ParentalControlsScreen(viewModel, onBack = { navController.popBackStack() })
                 }
                 composable(Routes.PROTOCOLS) {
-                    ProtocolsScreen(onBack = { navController.popBackStack() })
+                    ProtocolsScreen(
+                        onBack = { navController.popBackStack() },
+                        onCallProblem = { viewModel.reportActionProblem(it) },
+                    )
                 }
                 composable(Routes.RESPONDER) {
                     CommunityResponderScreen(viewModel, onBack = { navController.popBackStack() })

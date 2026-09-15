@@ -34,6 +34,49 @@
         android:name="android.hardware.telephony"
         android:required="false" />
 
+    <!--
+        Android 11 (API 30) package visibility.
+
+        Without these declarations `resolveActivity` returns null for apps that
+        exist, which would make Guardian tell the user "no dialler app is
+        available" during an emergency. Only the handlers Guardian actually
+        hands off to are declared — no broad QUERY_ALL_PACKAGES permission.
+    -->
+    <queries>
+        <!-- Emergency calling and the dialler fallback. -->
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+            <data android:scheme="tel" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.CALL" />
+            <data android:scheme="tel" />
+        </intent>
+        <!-- Emergency SMS composer fallback when SEND_SMS is not granted. -->
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="smsto" />
+        </intent>
+        <!-- Sharing an emergency location through the system share sheet. -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <!-- Showing an emergency location on a map, then a browser fallback. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <!-- Hands-free voice SOS uses the platform speech recogniser. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".GuardianApplication"
         android:allowBackup="true"

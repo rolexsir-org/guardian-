@@ -1,0 +1,110 @@
+name: Deploy backend
+
+# Guardian's backend is a Cloudflare **Worker**, not a Pages site. It is deployed
+# with `wrangler deploy` — never `wrangler pages deploy`, which is what produces
+# "Could not detect a directory containing static files (e.g. html, css and js)
+# for the project".
+#
+# This workflow is manual on purpose: it needs real production credentials, and a
+# safety backend must not be redeployed by an incidental push. It is a no-op (with
+# a clear message) until an operator adds the repository secrets below.
+on:
+  workflow_dispatch:
+    inputs:
+      apply_migrations:
+        description: "Apply pending D1 migrations to the production database before deploying"
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: wrangler deploy (Worker)
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloudflare/package-lock.json
+
+      - name: Verify the required production configuration is present
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${CLOUDFLARE_API_TOKEN}" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID}" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -n "${D1_DATABASE_ID}" ] || missing="$missing D1_DATABASE_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Deployment is blocked. Missing repository secrets:$missing"
+            echo "Create them under Settings -> Secrets and variables -> Actions."
+            echo "Nothing is fabricated: the Worker is not deployed without real values."
+            exit 1
+          fi
+          echo "All required deployment secrets are present."
+
+      - run: npm ci
+
+      # Re-verify before touching production. A backend that fails its own tests
+      # is never deployed.
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Inject the real D1 database id
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+        # wrangler.toml ships a placeholder so a real database id is never
+        # committed. It is substituted here, in the runner only.
+        run: |
+          set -euo pipefail
+          grep -q 'REPLACE_WITH_D1_DATABASE_ID' wrangler.toml
+          sed -i "s|REPLACE_WITH_D1_DATABASE_ID|${D1_DATABASE_ID}|" wrangler.toml
+          echo "D1 database id injected (value not printed)."
+
+      - name: Apply D1 migrations
+        if: ${{ inputs.apply_migrations }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx wrangler d1 migrations apply guardian-db --remote
+
+      - name: Deploy the Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx wrangler deploy
+
+      - name: Smoke-test the deployed health endpoint
+        env:
+          CLOUDFLARE_WORKER_URL: ${{ secrets.CLOUDFLARE_WORKER_URL }}
+        # /v1/health reports liveness and whether AUTH_SECRET is configured. It
+        # returns no secrets. A non-200 fails the deployment run.
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_WORKER_URL}" ]; then
+            echo "::warning::CLOUDFLARE_WORKER_URL is not set, so the deployment was not smoke-tested."
+            exit 0
+          fi
+          code="$(curl -sS -o /tmp/health.json -w '%{http_code}' "${CLOUDFLARE_WORKER_URL%/}/v1/health")"
+          echo "GET /v1/health -> $code"
+          cat /tmp/health.json
+          [ "$code" = "200" ]

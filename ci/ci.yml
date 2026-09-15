@@ -1,0 +1,180 @@
+name: CI
+
+# Guardian is verified here, not on a developer machine. Every job below runs a
+# real command and fails the workflow when that command fails; nothing is
+# reported as passing unless the underlying tool exited 0.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cloudflare Worker backend: types, unit/integration tests (workerd) and a real
+  # bundle of the Worker. `wrangler deploy --dry-run` proves the Worker builds and
+  # that every binding in wrangler.toml resolves — without touching production.
+  # ---------------------------------------------------------------------------
+  cloudflare:
+    name: Cloudflare backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloudflare/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (vitest / workerd)
+        run: npm test
+
+      - name: Build the Worker (dry-run deploy, no credentials used)
+        env:
+          # Wrangler must never phone home or pick up ambient credentials in CI.
+          WRANGLER_SEND_METRICS: "false"
+          CLOUDFLARE_API_TOKEN: ""
+        run: npx wrangler deploy --dry-run --outdir dist
+
+      - name: Assert the backend is a Worker, not a Pages site
+        # Guardian's backend is a Worker. A `wrangler pages deploy` anywhere in
+        # the repository would produce the "could not detect a directory
+        # containing static files" failure, so it is banned outright.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if grep -rIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+               -e 'pages deploy' -e 'pages_build_output_dir' . ; then
+            echo "::error::Cloudflare Pages deployment detected. Guardian's backend is a Worker (wrangler deploy)."
+            exit 1
+          fi
+          echo "No Pages deployment configuration found."
+
+  # ---------------------------------------------------------------------------
+  # Repository hygiene: no committed secrets, no reintroduced legacy backends.
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: Secrets and legacy-reference audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No secret material is tracked by Git
+        run: |
+          set -euo pipefail
+          matches="$(git ls-files | grep -Ei \
+            '(^|/)\.env$|(^|/)\.env\.|(^|/)dev\.vars$|(^|/)\.dev\.vars$|\.jks$|\.keystore$|keystore\.properties$|google-services\.json$|(^|/)\.npmrc$|(^|/)\.netrc$' || true)"
+          if [ -n "$matches" ]; then
+            echo "::error::Secret-bearing files are tracked by Git:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No secret-bearing files are tracked."
+
+      - name: No Firebase or Google AI Studio implementation in shipped source
+        run: |
+          set -euo pipefail
+          matches="$(grep -rIn --exclude-dir=.git --exclude-dir=node_modules \
+            -e 'com\.google\.firebase' -e 'FirebaseAuth' -e 'FirebaseDatabase' \
+            -e 'FirebaseOptions' -e 'google-services' -e 'com\.aistudio' -e 'ai\.studio' \
+            app/src cloudflare/src app/build.gradle.kts build.gradle.kts settings.gradle.kts \
+            gradle/libs.versions.toml cloudflare/wrangler.toml || true)"
+          if [ -n "$matches" ]; then
+            echo "::error::Legacy Firebase / AI Studio references found in shipped source or build configuration:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No Firebase or AI Studio references in shipped source or build configuration."
+
+      - name: No hardcoded demo coordinates in shipped Android source
+        run: |
+          set -euo pipefail
+          matches="$(grep -rIn -e '37\.7749' -e '\-122\.4194' app/src/main || true)"
+          if [ -n "$matches" ]; then
+            echo "::error::Hardcoded demo coordinates found in production Android source:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No hardcoded demo coordinates in app/src/main."
+
+  # ---------------------------------------------------------------------------
+  # Android application. JDK 21 is required because the unit tests run under
+  # Robolectric against SDK 36, which needs a Java 21 runtime.
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android (${{ matrix.task }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - task: test
+            gradle: testDebugUnitTest
+          - task: lint
+            gradle: lintDebug
+          - task: assembleDebug
+            gradle: assembleDebug
+          - task: assembleRelease
+            gradle: assembleRelease
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+
+      - name: Install the compile SDK and build tools
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools" >/dev/null
+          # AGP 9 resolves compileSdk 36.1; install it when the channel exposes it.
+          sdkmanager --install "platforms;android-36.1" >/dev/null 2>&1 || \
+            echo "platforms;android-36.1 is not published yet; AGP will resolve what it needs."
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.event_name != 'workflow_dispatch' }}
+
+      - name: Run ${{ matrix.gradle }}
+        # No signing material and no backend URL are available in CI. The build is
+        # expected to succeed without them: an unconfigured Guardian build compiles
+        # and fails safe at runtime. assembleRelease therefore produces an
+        # intentionally unsigned artifact.
+        run: ./gradlew --no-daemon --stacktrace ${{ matrix.gradle }}
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ matrix.task }}-reports
+          path: |
+            app/build/reports/**
+            app/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7

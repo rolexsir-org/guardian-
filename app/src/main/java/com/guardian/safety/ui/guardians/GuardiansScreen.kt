@@ -13,14 +13,20 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.guardian.safety.service.EmergencyActionResult
+import com.guardian.safety.service.EmergencyCallManager
+import com.guardian.safety.service.describe
 import com.guardian.safety.ui.GuardianViewModel
 import com.guardian.safety.ui.relativeTime
 import com.guardian.safety.ui.theme.*
+import com.guardian.safety.util.HapticUtils
 
 @Composable
 fun GuardiansScreen(viewModel: GuardianViewModel) {
+    val context = LocalContext.current
     val members by viewModel.familyMembers.collectAsState()
     val presence by viewModel.presence.collectAsState()
     val contacts by viewModel.contacts.collectAsState()
@@ -78,6 +84,17 @@ fun GuardiansScreen(viewModel: GuardianViewModel) {
                         else -> "Offline"
                     },
                     online = isOnline,
+                    // Family members are identified by account, not by phone
+                    // number, so there may be nothing to dial. A blank number
+                    // disables the button instead of leaving it a silent no-op.
+                    phoneNumber = member.phone.takeIf { it.isNotBlank() },
+                    onCall = { number ->
+                        HapticUtils.triggerHaptic(context, isHeavy = true)
+                        val outcome = EmergencyCallManager.callNumber(context, number)
+                        if (outcome !is EmergencyActionResult.Dispatched) {
+                            viewModel.reportActionProblem(outcome.describe())
+                        }
+                    },
                 )
             }
 
@@ -100,6 +117,14 @@ fun GuardiansScreen(viewModel: GuardianViewModel) {
                             "Awaiting verification • ${contact.phone}"
                         },
                         online = contact.isVerified,
+                        phoneNumber = contact.phone.takeIf { it.isNotBlank() },
+                        onCall = { number ->
+                            HapticUtils.triggerHaptic(context, isHeavy = true)
+                            val outcome = EmergencyCallManager.callNumber(context, number)
+                            if (outcome !is EmergencyActionResult.Dispatched) {
+                                viewModel.reportActionProblem(outcome.describe())
+                            }
+                        },
                     )
                 }
             }
@@ -107,8 +132,22 @@ fun GuardiansScreen(viewModel: GuardianViewModel) {
     }
 }
 
+/**
+ * One guardian or emergency contact.
+ *
+ * The call button is only enabled when there is a real number to dial, and the
+ * caller reports the actual [EmergencyActionResult] — a dialler hand-off is never
+ * presented as a placed call.
+ */
 @Composable
-fun GuardianCard(name: String, relation: String, status: String, online: Boolean) {
+fun GuardianCard(
+    name: String,
+    relation: String,
+    status: String,
+    online: Boolean,
+    phoneNumber: String? = null,
+    onCall: (String) -> Unit = {},
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -161,13 +200,22 @@ fun GuardianCard(name: String, relation: String, status: String, online: Boolean
             }
 
             IconButton(
-                onClick = { },
+                onClick = { phoneNumber?.let(onCall) },
+                enabled = phoneNumber != null,
                 modifier = Modifier
                     .size(44.dp)
                     .clip(CircleShape)
                     .background(DarkSurface)
             ) {
-                Icon(Icons.Default.Phone, contentDescription = null, tint = TextPrimary)
+                Icon(
+                    Icons.Default.Phone,
+                    contentDescription = if (phoneNumber != null) {
+                        "Call $name"
+                    } else {
+                        "No phone number saved for $name"
+                    },
+                    tint = if (phoneNumber != null) TextPrimary else TextSecondary,
+                )
             }
         }
     }

@@ -1,7 +1,5 @@
 package com.guardian.safety.ui.contacts
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import com.guardian.safety.data.ContactEntity
 import com.guardian.safety.data.MedicalProfileEntity
 import com.guardian.safety.ui.GuardianViewModel
+import com.guardian.safety.util.ExternalIntents
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -210,8 +209,13 @@ fun ContactsScreen(viewModel: GuardianViewModel) {
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             IconButton(
                                 onClick = {
-                                    val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${contact.phone}"))
-                                    context.startActivity(intent)
+                                    // Opening the dialler can fail on a device with
+                                    // no phone app; that must not crash a safety
+                                    // screen, so the outcome is reported instead.
+                                    val result = ExternalIntents.dial(context, contact.phone)
+                                    if (result is ExternalIntents.LaunchResult.Unavailable) {
+                                        viewModel.reportActionProblem(result.message)
+                                    }
                                 }
                             ) {
                                 Icon(imageVector = Icons.Default.Call, contentDescription = "Call", tint = MaterialTheme.colorScheme.primary)

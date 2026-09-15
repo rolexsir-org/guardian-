@@ -1,6 +1,5 @@
 package com.guardian.safety.ui.medical
 
-import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -12,10 +11,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
-import androidx.core.content.ContextCompat
 import com.guardian.safety.ui.GuardianViewModel
+import com.guardian.safety.util.BiometricAuthManager
+import com.guardian.safety.util.BiometricOutcome
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -23,8 +23,11 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
     val context = LocalContext.current
     val medicalProfile by viewModel.medicalProfile.collectAsState()
 
+    // The screen starts CLOSED. It opens only after the platform has actually
+    // confirmed the user; there is no shortcut and no fail-open branch.
     var isAuthenticated by remember { mutableStateOf(false) }
     var authError by remember { mutableStateOf<String?>(null) }
+    var unavailableReason by remember { mutableStateOf<String?>(null) }
 
     // Form fields state
     var name by remember { mutableStateOf("") }
@@ -52,42 +55,24 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
     }
 
     fun authenticateWithBiometrics() {
-        val activity = context as? FragmentActivity
-        if (activity == null) {
-            isAuthenticated = true
-            return
-        }
-
-        val executor = ContextCompat.getMainExecutor(context)
-        val biometricPrompt = BiometricPrompt(activity, executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
+        authError = null
+        unavailableReason = null
+        BiometricAuthManager.authenticate(
+            context = context,
+            title = "Secure Medical Profile",
+            subtitle = "Confirm it is you to view and edit encrypted medical data",
+        ) { outcome ->
+            when (outcome) {
+                BiometricOutcome.Authenticated -> {
                     isAuthenticated = true
                     authError = null
+                    unavailableReason = null
                 }
-
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    authError = "Authentication error: $errString"
-                }
-
-                override fun onAuthenticationFailed() {
-                    super.onAuthenticationFailed()
-                    authError = "Biometric authentication failed. Try again."
-                }
-            })
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Secure Medical Profile")
-            .setSubtitle("Authenticate to view and edit encrypted medical data")
-            .setNegativeButtonText("Cancel")
-            .build()
-
-        try {
-            biometricPrompt.authenticate(promptInfo)
-        } catch (e: Exception) {
-            isAuthenticated = true
+                // A device with no enrolled biometric or screen lock cannot open
+                // health records: the reason is shown instead of the content.
+                is BiometricOutcome.NotEnrolled -> unavailableReason = outcome.message
+                is BiometricOutcome.Rejected -> authError = outcome.message
+            }
         }
     }
 
@@ -138,23 +123,34 @@ fun MedicalProfileScreen(viewModel: GuardianViewModel) {
                     )
                     if (authError != null) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(authError!!, color = MaterialTheme.colorScheme.error)
+                        Text(
+                            authError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                    if (unavailableReason != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            unavailableReason!!,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.testTag("medical_auth_unavailable"),
+                        )
                     }
                     Spacer(modifier = Modifier.height(24.dp))
+                    // Retrying is allowed; opening without confirmation is not.
+                    // The previous "Emergency Bypass / Test Unlock" button set
+                    // isAuthenticated = true unconditionally, which made the
+                    // biometric gate on encrypted health data decorative.
                     Button(
                         onClick = { authenticateWithBiometrics() },
+                        enabled = unavailableReason == null,
                         modifier = Modifier.testTag("unlock_biometric_button")
                     ) {
                         Icon(Icons.Default.Fingerprint, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Unlock with Biometrics")
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(
-                        onClick = { isAuthenticated = true },
-                        modifier = Modifier.testTag("bypass_auth_button")
-                    ) {
-                        Text("Emergency Bypass / Test Unlock")
+                        Text(if (authError == null) "Unlock with Biometrics" else "Try again")
                     }
                 }
             } else {
