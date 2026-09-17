@@ -231,16 +231,4 @@ AndroidX at all. Results are therefore taken from the `android` CI job rather th
 asserted here. On-device QA (real call, real SMS, real GPS, sensors, reboot,
 background restrictions) requires hardware and has not been performed.
 
-## Origin of this repository
 
-This repository was created from the GitHub template
-[`google-gemini/aistudio-repository-template`](https://github.com/google-gemini/aistudio-repository-template).
-Every file that came from the template has been removed or rewritten; nothing from it
-remains in the working tree.
-
-The template attribution itself is stored as immutable repository metadata and is not
-part of the Git history. GitHub exposes no supported API or UI operation to remove it
-(`PATCH /repos/{owner}/{repo}` returns `403 Resource not accessible by integration`, and the
-GraphQL schema has no field or mutation for it). It is therefore **retained**: the
-`template_repository` field on `rolexsir-org/guardian-` still names the template, and
-that is a factual statement of origin rather than leftover content.
