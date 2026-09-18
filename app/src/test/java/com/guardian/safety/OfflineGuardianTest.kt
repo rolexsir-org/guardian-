@@ -229,4 +229,37 @@ class OfflineGuardianTest {
         val remaining = repository.getLocationHistory().first()
         assertEquals(1, remaining.size)
     }
+
+    /**
+     * Guardian Pro extends location retention. A fix that the free plan would
+     * drop must survive on Pro — this is the paid benefit actually working, not
+     * just being advertised on the paywall.
+     */
+    @Test
+    fun guardianProKeepsLocationHistoryTheFreePlanWouldPurge() = runBlocking {
+        // 30 days old: beyond the 7 day free window, inside the 90 day Pro window.
+        val thirtyDaysAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1_000
+        dao.insertLocationCache(
+            LocationCacheEntity(
+                latitude = 28.6139,
+                longitude = 77.2090,
+                timestamp = thirtyDaysAgo,
+                synced = true,
+            ),
+        )
+
+        repository.purgeOldLocations(pro = true)
+        assertEquals(
+            "Guardian Pro must retain a 30 day old fix.",
+            1,
+            repository.getLocationHistory().first().size,
+        )
+
+        repository.purgeOldLocations(pro = false)
+        assertEquals(
+            "The free plan must purge a 30 day old fix.",
+            0,
+            repository.getLocationHistory().first().size,
+        )
+    }
 }

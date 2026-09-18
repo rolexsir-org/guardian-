@@ -1,5 +1,6 @@
 package com.guardian.safety
 
+import android.app.Activity
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.guardian.safety.billing.ProState
@@ -12,6 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 

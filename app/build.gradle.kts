@@ -25,6 +25,23 @@ val cloudflareWorkerUrl = configurationValue("CLOUDFLARE_WORKER_URL")
 val revenueCatAndroidApiKey = configurationValue("REVENUECAT_ANDROID_API_KEY")
 val revenueCatEntitlementId = configurationValue("REVENUECAT_ENTITLEMENT_ID")
 
+/**
+ * RevenueCat Test Store key (`test_...`), used for debug builds so purchases can
+ * be exercised end to end without a Google Play Console account.
+ *
+ * RevenueCat hard-fails an app that ships a Test Store key in a release build, so
+ * this value is compiled into the debug build type ONLY. Release builds always get
+ * REVENUECAT_ANDROID_API_KEY.
+ */
+val revenueCatTestStoreKey = configurationValue("REVENUECAT_TEST_STORE_KEY")
+
+if (revenueCatTestStoreKey.isNotEmpty() && !revenueCatTestStoreKey.contains("test")) {
+  logger.warn(
+    "Guardian: REVENUECAT_TEST_STORE_KEY does not look like a Test Store key " +
+      "(expected it to contain 'test'). Check you have not pasted a production key."
+  )
+}
+
 val keystorePath = configurationValue("KEYSTORE_PATH")
 val storePasswordValue = configurationValue("STORE_PASSWORD")
 val keyAliasValue = configurationValue("KEY_ALIAS")
@@ -68,6 +85,14 @@ android {
 
   buildTypes {
     release {
+      // A Test Store key in a release build is a hard error: RevenueCat crashes
+      // the app on launch, and test purchases must never reach real users.
+      if (revenueCatAndroidApiKey.startsWith("test_") || revenueCatAndroidApiKey.contains("_test_")) {
+        throw GradleException(
+          "Guardian: REVENUECAT_ANDROID_API_KEY looks like a RevenueCat Test Store key. " +
+            "Release builds must use the production Android SDK key (goog_...)."
+        )
+      }
       isCrunchPngs = false
       isMinifyEnabled = true
       isShrinkResources = true
@@ -85,6 +110,14 @@ android {
       // Uses the standard Android debug keystore managed by the Android Gradle
       // Plugin. Never used for a production artifact.
       isMinifyEnabled = false
+
+      // Debug builds prefer the Test Store key when one is supplied, so the full
+      // purchase flow (offering -> paywall -> purchase -> entitlement -> restore)
+      // can be demonstrated with no Play Console account and no real charge.
+      // Falls back to the normal key so nothing breaks when it is absent.
+      if (revenueCatTestStoreKey.isNotEmpty()) {
+        buildConfigField("String", "REVENUECAT_ANDROID_API_KEY", "\"$revenueCatTestStoreKey\"")
+      }
     }
   }
   compileOptions {

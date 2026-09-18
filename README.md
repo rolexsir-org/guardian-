@@ -86,7 +86,8 @@ and it requires dashboard access that CI tokens alone do not grant.
 
 ## Android (`app/`)
 
-Package `com.guardian.safety`. Kotlin 2.3.21, AGP 9.1, Jetpack Compose, Room, WorkManager.
+Package `com.guardian.safety`. Kotlin 2.2.10 (AGP 9.1 built-in Kotlin), AGP 9.1.1,
+Jetpack Compose, Room, WorkManager.
 
 * **Encrypted at rest.** Room runs on SQLCipher (`net.zetetic:sqlcipher-android`, which
   supports 16 KB page devices). The key is generated per install and wrapped by the
@@ -108,9 +109,16 @@ All configuration is injected at build time and is absent by default:
 | Property / env var | Purpose |
 | --- | --- |
 | `CLOUDFLARE_WORKER_URL` | Public HTTPS base URL of the deployed Worker |
-| `REVENUECAT_ANDROID_API_KEY` | RevenueCat **public** Android SDK key |
+| `REVENUECAT_ANDROID_API_KEY` | RevenueCat **public** Android SDK key (`goog_…`), used by release builds |
+| `REVENUECAT_TEST_STORE_KEY` | RevenueCat **Test Store** key, used by **debug builds only** |
 | `REVENUECAT_ENTITLEMENT_ID` | Entitlement treated as Guardian Pro (default `guardian_pro`) |
 | `KEYSTORE_PATH`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` | Release signing |
+
+`REVENUECAT_TEST_STORE_KEY` lets the **entire** purchase flow — offering, paywall,
+purchase, entitlement, restore — be exercised with no Google Play Console account and
+no real money. It is compiled into the debug build type only, and `assembleRelease`
+**fails the build** if a test key is ever supplied as the production key, because
+RevenueCat crashes any release build configured with one.
 
 ```bash
 cp .env.example .env    # then fill in real values
@@ -123,6 +131,25 @@ that the service is not configured, and the device-only features keep working. W
 never pretends a purchase succeeded. Release builds are unsigned unless signing
 credentials are present; no keystore is committed.
 
+### Guardian Pro
+
+Guardian's monetisation rule: **nothing that can save a life is behind the paywall.**
+SOS, emergency calling, emergency SMS, the medical ID, offline records and live
+location during an emergency are free forever, signed in or not, on every build.
+
+Pro raises capacity limits on top of that floor. Every limit lives in
+`billing/ProFeatures.kt` so the enforced behaviour and the paywall copy cannot drift
+apart, and each one is asserted in `ProFeaturesTest`:
+
+| | Free | Guardian Pro |
+| --- | --- | --- |
+| Trusted contacts | 3 | 25 |
+| Encrypted location history | 7 days | 90 days |
+| Rolling audio evidence buffer | 5 min | 30 min |
+
+Losing Pro never deletes data: contacts saved under a subscription stay saved and are
+still used in an emergency. The limit applies only to *adding* a new contact.
+
 ### Tests
 
 ```bash
@@ -132,8 +159,10 @@ credentials are present; no keystore is committed.
 
 Covered: package identity, authentication and token handling, offline queueing and
 retry, location capture, the SQLCipher 6→7 migration, encrypted preference flags,
-emergency-number resolution, sensor fail-closed behaviour, subscription state, and the
-emergency call/SMS result contract.
+emergency-number resolution, sensor fail-closed behaviour, subscription state, the
+Guardian Pro limits (`ProFeaturesTest`, including that the paywall never claims to
+unlock an emergency feature), Pro location retention, and the emergency call/SMS
+result contract.
 
 ## Continuous integration
 
@@ -220,7 +249,7 @@ with a placeholder `index.html`.
 | --- | --- |
 | Production deploy, D1/R2/DO provisioning | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID`, `AUTH_SECRET` |
 | Release signing | No keystore; `assembleRelease` is unsigned by design |
-| RevenueCat production billing | No public Android SDK key and no store configuration |
+| RevenueCat **production** billing | Needs a `goog_…` key and Play Console products. Not required to run or demo purchases — use `REVENUECAT_TEST_STORE_KEY` instead |
 
 **Not verified locally**
 

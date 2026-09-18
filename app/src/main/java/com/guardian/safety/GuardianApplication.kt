@@ -31,6 +31,7 @@ import com.guardian.safety.worker.SosSyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
 import java.util.concurrent.TimeUnit
 
@@ -159,6 +160,15 @@ class AppContainer(val application: Application) {
         // Attach the SDK to whoever is already signed in on this device, so
         // entitlements resolve for the right account on a cold start.
         subscriptionManager.configure(tokenManager.identity()?.userId)
+
+        // Keep Pro-gated capacity limits in step with the real entitlement for
+        // as long as the process lives. Nothing here can block a safety feature:
+        // it only changes how much evidence is retained.
+        appScope.launch {
+            subscriptionManager.state.collect { state ->
+                audioBlackbox.applyProEntitlement(state is com.guardian.safety.billing.ProState.Active)
+            }
+        }
         if (isCloudConfigured) scheduleBackgroundWork()
     }
 

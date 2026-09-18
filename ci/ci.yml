@@ -60,8 +60,14 @@ jobs:
         # containing static files" failure, so it is banned outright.
         run: |
           cd "$GITHUB_WORKSPACE"
+          # Scope the scan to build configuration and scripts. Prose that merely
+          # *describes* this rule (README, comments in this workflow) must not
+          # trip it, so Markdown and this file itself are excluded.
           if grep -rIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
-               -e 'pages deploy' -e 'pages_build_output_dir' . ; then
+               --include='*.toml' --include='*.json' --include='*.yml' --include='*.yaml' \
+               --include='*.sh' --include='*.ts' --include='*.js' \
+               --exclude='ci.yml' --exclude='deploy-backend.yml' \
+               -e 'wrangler pages deploy' -e 'pages_build_output_dir' . ; then
             echo "::error::Cloudflare Pages deployment detected. Guardian's backend is a Worker (wrangler deploy)."
             exit 1
           fi
@@ -80,7 +86,11 @@ jobs:
       - name: No secret material is tracked by Git
         run: |
           set -euo pipefail
-          matches="$(git ls-files | grep -Ei \
+          # `.env.example` is a committed template with no real values, so it is
+          # explicitly allowed; every other .env* file is treated as a secret.
+          matches="$(git ls-files \
+            | grep -Ev '(^|/)\.env\.example$' \
+            | grep -Ei \
             '(^|/)\.env$|(^|/)\.env\.|(^|/)dev\.vars$|(^|/)\.dev\.vars$|\.jks$|\.keystore$|keystore\.properties$|google-services\.json$|(^|/)\.npmrc$|(^|/)\.netrc$' || true)"
           if [ -n "$matches" ]; then
             echo "::error::Secret-bearing files are tracked by Git:"

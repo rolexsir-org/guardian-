@@ -29,7 +29,11 @@ class CleanupWorker(
             ?: return Result.failure(workDataOf(KEY_REASON to "Guardian is not initialised."))
 
         return try {
-            val purged = container.repository.purgeOldLocations()
+            // Guardian Pro extends how long encrypted location history is kept.
+            // The entitlement is read from RevenueCat, never assumed.
+            val pro = container.subscriptionManager.state.value is
+                com.guardian.safety.billing.ProState.Active
+            val purged = container.repository.purgeOldLocations(pro = pro)
             Log.i(TAG, "Retention sweep removed $purged expired location fix(es).")
             Result.success(workDataOf(KEY_PURGED_LOCATIONS to purged))
         } catch (error: Exception) {

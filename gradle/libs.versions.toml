@@ -10,7 +10,11 @@ lifecycleRuntimeCompose = "2.8.7"
 activityCompose = "1.10.1"
 kotlin = "2.2.10"
 composeBom = "2024.09.00"
-googleDevtoolsKsp = "2.3.5"
+# KSP must match the Kotlin compiler AGP runs. AGP 9.1.1 has a runtime
+# dependency on Kotlin Gradle Plugin 2.2.10 (built-in Kotlin) and ships
+# symbol-processing-gradle-plugin 2.2.10-2.0.2. KSP 2.3.5 targets Kotlin 2.3 and
+# does not match that compiler.
+googleDevtoolsKsp = "2.2.10-2.0.2"
 navigationCompose = "2.8.9"
 roomRuntime = "2.7.0"
 roomKtx = "2.7.0"
@@ -36,7 +40,12 @@ biometric = "1.2.0-alpha05"
 sqlCipher = "4.19.0"
 # Version paired with SQLCipher for Android 4.19.0 by its own build.
 androidxSqlite = "2.7.0"
-revenueCat = "8.11.0"
+# RevenueCat Android SDK. 10.x ships Google Play Billing Library 8.3.0, which
+# Play has required for all new apps and updates since 2026-08-31, and supports
+# the RevenueCat Test Store (9.9.0+) so purchases can be exercised end to end
+# without a Google Play Console account. minSdk 23 is required by 10.x; Guardian
+# is on 24.
+revenueCat = "10.22.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }

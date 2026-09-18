@@ -24,9 +24,9 @@ sealed interface RecordingStart {
  *
  * Behaviour is deliberately simple and verifiable:
  * * Audio is recorded to the app's private files directory in fixed segments. Only
- *   the most recent [MAX_SEGMENTS] are kept, so the buffer is bounded at roughly
- *   `MAX_SEGMENTS * SEGMENT_MS` (five minutes at the defaults) and cannot fill the
- *   device.
+ *   the most recent [maxSegments] are kept, so the buffer is bounded at roughly
+ *   `maxSegments * SEGMENT_MS` and cannot fill the device. Guardian Pro raises
+ *   that bound; see [applyProEntitlement].
  * * Nothing is uploaded automatically. [latestSegments] hands real files to the
  *   evidence queue and the user is told what was attached.
  * * Failures are reported: no microphone permission, no recorder, or a recorder
@@ -36,6 +36,21 @@ sealed interface RecordingStart {
  *   when the process is going away so the microphone is not held.
  */
 class AudioBlackboxRecorder(private val context: Context) {
+
+    /**
+     * How many one-minute segments to keep. Raised while Guardian Pro is active
+     * and lowered again when it is not; the value is always driven by the real
+     * entitlement, never assumed. Free users still get a full buffer — Pro only
+     * makes it longer.
+     */
+    @Volatile
+    var maxSegments: Int = MAX_SEGMENTS
+        private set
+
+    /** Applies the retention that matches the current entitlement. */
+    fun applyProEntitlement(pro: Boolean) {
+        maxSegments = com.guardian.safety.billing.ProFeatures.audioBufferMinutes(pro)
+    }
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -134,7 +149,7 @@ class AudioBlackboxRecorder(private val context: Context) {
     }
 
     /** The buffered segments, oldest first. Only files with real audio are listed. */
-    fun latestSegments(limit: Int = MAX_SEGMENTS): List<File> =
+    fun latestSegments(limit: Int = maxSegments): List<File> =
         bufferDirectory()
             ?.listFiles { file -> file.isFile && file.name.startsWith("blackbox-") && file.length() > 0L }
             ?.sortedBy { it.name }
@@ -159,8 +174,8 @@ class AudioBlackboxRecorder(private val context: Context) {
         val files = directory.listFiles { file -> file.isFile && file.name.startsWith("blackbox-") }
             ?.sortedBy { it.name }
             ?: return
-        if (files.size <= MAX_SEGMENTS) return
-        files.take(files.size - MAX_SEGMENTS).forEach { stale ->
+        if (files.size <= maxSegments) return
+        files.take(files.size - maxSegments).forEach { stale ->
             runCatching { stale.delete() }
                 .onFailure { Log.w(TAG, "Could not delete the old audio segment ${stale.name}") }
         }
