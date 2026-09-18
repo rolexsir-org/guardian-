@@ -27,6 +27,13 @@ Android app  ──HTTPS/JSON──▶  Worker (src/index.ts)  ──▶  D1   (
 | `migrations/` | Versioned D1 schema migrations |
 | `test/` | Vitest (workerd) suites: smoke, auth, family, sos, safety events, security, realtime, evidence |
 
+> **Deploying from the Cloudflare dashboard?** This is a **Worker**, not a Pages
+> site. Connect it as a Worker with root directory `cloudflare` and deploy command
+> `npx wrangler deploy`. Using Pages produces
+> `✘ [ERROR] Could not detect a directory containing static files ...` because the
+> repository has no static frontend. Full instructions and troubleshooting:
+> [`../docs/cloudflare-deploy.md`](../docs/cloudflare-deploy.md).
+
 ## Prerequisites
 
 * Node.js ≥ 20, npm
