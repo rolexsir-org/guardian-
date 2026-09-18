@@ -5,11 +5,20 @@ and a **public open-source repository**. No App Store / Google Play / Galaxy Sto
 release is required, and therefore no developer account, no 12-tester closed test, and
 no store review.
 
-> **Eligibility gate you must confirm:** Next Gen requires an **active student** with a
-> verifiable academic email (school, university, bootcamp or other academic program) on
-> the Devpost account. Email-domain eligibility may be checked against JetBrains/swot.
-> If nobody on the team has one, this category is not open and a store release is
-> required after all — see `SHIPATON-READINESS.md` §9.
+> **Two gates you must clear yourself — both are blocking:**
+>
+> 1. **The repository is PRIVATE.** I checked: `visibility: private`. Next Gen requires a
+>    **public, open-source repository** with a detectable licence, because that repo *is*
+>    the submission. Make it public before you submit:
+>    *Settings → General → Danger Zone → Change visibility → Make public.*
+>    I cannot do this — the App token has no admin permission (`403`).
+> 2. **Active student with a verifiable academic email** on the Devpost account
+>    (school, university, bootcamp or other academic program); domain eligibility may be
+>    checked against JetBrains/swot. If nobody on the team has one, this category is not
+>    open and a store release is required after all — see `SHIPATON-READINESS.md` §9.
+>
+> Before making the repo public, skim the history for anything you would not want
+> published. I found no tracked secrets (the CI secret scan passes), but you own that call.
 
 ---
 
@@ -88,10 +97,29 @@ film the entitlement lapsing.
 
 ### 5. Install the CI workflows (2 min, needs a normal user account)
 
-The workflows are complete in `ci/` but **are not installed** — the GitHub App token
-used here lacks the `workflows` permission. I confirmed this directly: pushing
-`.github/workflows/ci.yml` is rejected with *"refusing to allow a GitHub App to create
-or update workflow ... without `workflows` permission"*. From your own clone:
+The workflows are complete and **verified** in `ci/`, but **cannot be installed from
+here**. I tried both available routes and both are blocked at the server:
+
+| Route | Result |
+|---|---|
+| `git push` with `.github/workflows/ci.yml` | `refusing to allow a GitHub App to create or update workflow ... without 'workflows' permission` |
+| REST Contents API (`PUT /repos/.../contents/...`) | `403 Resource not accessible by integration` |
+
+This is an external GitHub App permission limit, not a problem with the files. Both
+YAML files parse cleanly (`ci.yml` → jobs `cloudflare`, `hygiene`, `android`;
+`deploy-backend.yml` → job `deploy`).
+
+**I ran the jobs' actual commands locally instead, and they pass:**
+
+| Check | Result |
+|---|---|
+| `npm ci` | ✅ clean install |
+| `npm run typecheck` (`tsc --noEmit`) | ✅ no errors |
+| `npm test` (vitest/workerd) | ✅ **57/57 passing**, 8 files |
+| `wrangler deploy --dry-run` | ✅ bundles; all 4 bindings resolve (`SAFETY_HUB` DO, `DB` D1, `EVIDENCE` R2, vars) |
+| hygiene: secrets / Firebase / demo coords / Pages-deploy | ✅ **all 4 PASS** (the two I repaired included) |
+
+The `android` job is the one still unverified — no JDK here. From your own clone:
 
 ```bash
 git checkout arena/01a0b3d8-guardian && git pull
@@ -109,7 +137,8 @@ the cheapest credibility you can buy.
 
 | Asset | Status |
 |---|---|
-| Public repo with open-source licence | ✅ MIT `LICENSE` at root |
+| Open-source licence | ✅ MIT `LICENSE` at root |
+| Repository is **public** | ⬜ **currently PRIVATE — blocking** |
 | 1024×1024 app icon | ✅ `brand/devpost-icon-1024.png` |
 | Demo video ≤ 2 min, public on YouTube/Vimeo | ⬜ **you must record** |
 | ≥ 1 screenshot, 1179×2556, no device frame | ⬜ **capture from the running app** |
@@ -157,13 +186,20 @@ Judges are not required to watch past 2:00, so lead with the product, not the se
 
 ## Honest status
 
-**Done and verifiable by reading the diff:** SDK on a Play-compliant Billing 8, Test
-Store wired with a release-build guard, three real entitlement gates with tests, a
-priced paywall, two genuine compile errors fixed, a toolchain mismatch corrected, two
-broken CI checks repaired and re-run green, a real icon, and an MIT licence.
+**Executed and passing** (real commands, real output):
 
-**Not done, and not doable from here:** the Android build has never been compiled or
-run; there is no RevenueCat dashboard, video, screenshot, or Devpost entry; and the
-student-eligibility question is yours to answer. The backend is also still undeployed,
-so cloud features (family, chat, evidence vault) will report "not configured" unless
-you deploy the Worker — the device-only features that carry the demo all work without it.
+* Cloudflare Worker — `tsc --noEmit` clean, **57/57 vitest tests**, `wrangler
+  deploy --dry-run` bundling with all four bindings resolved.
+* All four CI `hygiene` checks, including the two that were broken and are now repaired.
+
+**Done, but verified only by inspection:** the Android changes — Billing 8 SDK, Test
+Store wiring with a release-build guard, three entitlement gates, the priced paywall,
+two genuine compile-error fixes, and the KSP/Kotlin alignment. This environment has no
+JDK and no route to `dl.google.com` or Maven, so **none of the Kotlin has been
+compiled**. Run `./gradlew testDebugUnitTest assembleDebug` first.
+
+**Not done, and not doable from here:** the repo is still **private** (blocking); the
+CI workflows cannot be installed by this token; and there is no RevenueCat dashboard,
+video, screenshot or Devpost entry. Student eligibility is yours to confirm. The backend
+is also undeployed, so cloud features (family, chat, evidence vault) will report "not
+configured" — the device-only features that carry the demo all work without it.
