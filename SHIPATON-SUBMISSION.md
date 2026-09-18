@@ -15,7 +15,11 @@ no store review.
 > 2. **Active student with a verifiable academic email** on the Devpost account
 >    (school, university, bootcamp or other academic program); domain eligibility may be
 >    checked against JetBrains/swot. If nobody on the team has one, this category is not
->    open and a store release is required after all — see `SHIPATON-READINESS.md` §9.
+>    open: every other category requires a **fully published store listing**, which the
+>    Google Play timeline no longer allows — a new personal developer account must run a
+>    closed test with 12 testers for 14 continuous days before it can even apply for
+>    production access. The Samsung Galaxy Store has no equivalent gate and is the only
+>    realistic route to a live listing before the deadline.
 >
 > Before making the repo public, skim the history for anything you would not want
 > published. I found no tracked secrets (the CI secret scan passes), but you own that call.
