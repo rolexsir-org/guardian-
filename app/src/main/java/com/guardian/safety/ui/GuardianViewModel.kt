@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.guardian.safety.AppContainer
+import com.guardian.safety.billing.ProFeatures
 import com.guardian.safety.billing.ProState
 import com.guardian.safety.billing.PurchaseOutcome
 import com.guardian.safety.billing.RestoreOutcome
@@ -696,8 +697,21 @@ class GuardianViewModel(
 
     // ------------------------------------------------------------------ contacts
 
+    /**
+     * Adds a trusted contact, subject to the Guardian Pro capacity limit.
+     *
+     * The limit is a *storage* limit only. It never affects an emergency: SOS,
+     * calling and SMS use whatever contacts are already saved, and existing
+     * contacts are never removed when a subscription lapses.
+     */
     fun addContact(name: String, phone: String, relationship: String, isPrimary: Boolean) {
         scope.launch {
+            val pro = proState.value is ProState.Active
+            val existing = repository.getAllContactsOnce().size
+            if (!ProFeatures.canAddContact(existing, pro)) {
+                _dataState.value = DataState.Failure(ProFeatures.contactLimitMessage(pro))
+                return@launch
+            }
             _dataState.value = DataState.Loading
             when (val result = repository.addContact(name, phone, relationship, isPrimary)) {
                 is ApiResult.Success -> _dataState.value = DataState.Success("Contact saved and synced.")
@@ -1164,6 +1178,28 @@ class GuardianViewModel(
 
     val proState: StateFlow<ProState> = container.subscriptionManager.state
     val proOfferings: StateFlow<Offerings?> = container.subscriptionManager.offerings
+
+    /** True only when RevenueCat reports the entitlement active. */
+    val isPro: StateFlow<Boolean> = proState
+        .map { it is ProState.Active }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /**
+     * The real, localised price string from the store, e.g. "₹249.00" — never a
+     * hardcoded price. Null when no offering has loaded, in which case the
+     * paywall must not claim a price.
+     */
+    val proPriceLabel: StateFlow<String?> = proOfferings
+        .map { offerings ->
+            val pkg = offerings?.current?.monthly ?: offerings?.current?.availablePackages?.firstOrNull()
+            pkg?.product?.price?.formatted
+        }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    /** Trusted contacts stored versus the limit that applies to this user. */
+    val contactUsage: StateFlow<Pair<Int, Int>> = combine(contacts, isPro) { saved, pro ->
+        saved.size to ProFeatures.contactLimit(pro)
+    }.stateIn(scope, SharingStarted.Eagerly, 0 to ProFeatures.FREE_CONTACT_LIMIT)
 
     fun refreshProState() {
         scope.launch { container.subscriptionManager.refresh() }

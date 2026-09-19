@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Monochrome (themed icon) layer for Android 13+.
+
+  The system tints this layer a single colour, so it cannot rely on a contrasting
+  punch-out the way the full-colour foreground does. The pin centre is therefore
+  cut out of the shape itself using an even-odd style sub-path rather than being
+  painted over.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,25.5L30.5,34.2v19.9c0,14.6 9.8,28.2 23.5,32.4c13.7,-4.2 23.5,-17.8 23.5,-32.4V34.2L54,25.5zM54,32.9l16.9,6.2v15c0,11.4 -7.2,22 -16.9,25.7c-9.7,-3.7 -16.9,-14.3 -16.9,-25.7v-15L54,32.9z" />
+
+    <!-- Pin with the centre removed via a reversed inner circle (nonZero winding). -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,42.2c-6.1,0 -11,4.9 -11,11c0,8.2 11,19.4 11,19.4s11,-11.2 11,-19.4C65,47.1 60.1,42.2 54,42.2zM54,49.1c2.3,0 4.1,1.8 4.1,4.1c0,2.3 -1.8,4.1 -4.1,4.1c-2.3,0 -4.1,-1.8 -4.1,-4.1C49.9,50.9 51.7,49.1 54,49.1z" />
+</vector>

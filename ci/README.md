@@ -21,7 +21,7 @@ problem with the files.
 ## Installing them (one command, from a clone with a normal user account)
 
 ```bash
-git checkout arena/01a0a47d-guardian
+git checkout arena/01a0b3d8-guardian
 git pull
 mkdir -p .github/workflows
 git mv ci/ci.yml .github/workflows/ci.yml

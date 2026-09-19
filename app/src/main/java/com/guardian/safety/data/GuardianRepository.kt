@@ -609,15 +609,23 @@ class GuardianRepository(
     /**
      * Applies local location retention and reports how many rows were removed.
      *
-     * Synced fixes go after [LOCATION_RETENTION_MS]. Fixes that were never
-     * accepted by the server survive for [UNSYNCED_RETENTION_MS] so a device that
-     * has been offline for days can still send what it recorded.
+     * Synced fixes are dropped after the retention window for the current plan
+     * (see `ProFeatures.locationRetentionDays`). Fixes the server never accepted
+     * survive a further [UNSYNCED_GRACE_MS] so a device that has been offline for
+     * days can still send what it recorded.
+     *
+     * @param pro whether Guardian Pro is active, which extends the window.
      */
-    suspend fun purgeOldLocations(): Int = withContext(Dispatchers.IO) {
+    suspend fun purgeOldLocations(pro: Boolean = false): Int = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
+        val retentionMs = com.guardian.safety.billing.ProFeatures
+            .locationRetentionDays(pro).toLong() * DAY_MS
+        // Unsynced fixes always outlive synced ones by the same margin, so an
+        // offline stretch is still replayable on either plan.
+        val hardCutoffMs = retentionMs + UNSYNCED_GRACE_MS
         guardianDao.purgeOldLocations(
-            retentionCutoff = now - LOCATION_RETENTION_MS,
-            hardCutoff = now - UNSYNCED_RETENTION_MS,
+            retentionCutoff = now - retentionMs,
+            hardCutoff = now - hardCutoffMs,
         )
     }
 
@@ -918,7 +926,12 @@ class GuardianRepository(
         const val CANCELLED_STATUS = "CANCELLED"
         const val DEFAULT_RADIUS_METERS = 5_000
         const val DEFAULT_TTL_MINUTES = 720
-        const val LOCATION_RETENTION_MS = 7L * 24 * 60 * 60 * 1_000
-        const val UNSYNCED_RETENTION_MS = 14L * 24 * 60 * 60 * 1_000
+        const val DAY_MS = 24L * 60 * 60 * 1_000
+
+        /**
+         * Extra time a fix the server never accepted survives beyond the plan's
+         * retention window, so a long offline stretch can still be replayed.
+         */
+        const val UNSYNCED_GRACE_MS = 7L * 24 * 60 * 60 * 1_000
     }
 }

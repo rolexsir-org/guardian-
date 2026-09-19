@@ -35,6 +35,8 @@ fun MoreScreen(
     val accountLabel = (sessionState as? com.guardian.safety.service.SessionState.SignedIn)
         ?.session?.email ?: "Not signed in"
     val proState by viewModel.proState.collectAsState()
+    val proPriceLabel by viewModel.proPriceLabel.collectAsState()
+    val contactUsage by viewModel.contactUsage.collectAsState()
     var showProDialog by remember { mutableStateOf(false) }
     // The store sheet needs a foreground activity; without one the button is not shown.
     val activity = (LocalContext.current as? Activity)
@@ -44,6 +46,9 @@ fun MoreScreen(
     if (showProDialog) {
         GuardianProDialog(
             state = proState,
+            priceLabel = proPriceLabel,
+            contactsSaved = contactUsage.first,
+            contactLimit = contactUsage.second,
             onDismiss = { showProDialog = false },
             onPurchase = activity?.let { host -> { viewModel.purchasePro(host) } },
             onRestore = { viewModel.restoreProPurchases() },
@@ -163,62 +168,138 @@ fun MoreTile(title: String, subtitle: String, icon: ImageVector, onClick: () -> 
 
 
 /**
- * Guardian Pro details.
+ * Guardian Pro paywall.
  *
  * Everything shown here comes from RevenueCat: the entitlement state, the real
- * product price, and the outcome of a purchase or restore. When subscriptions are
- * not configured for this build the dialog says so instead of offering a button that
- * cannot do anything.
+ * localised product price, and the outcome of a purchase or restore. Nothing is
+ * hardcoded — when no offering has loaded the dialog does not invent a price, and
+ * when subscriptions are not configured for this build it says so instead of
+ * offering a button that cannot do anything.
+ *
+ * The dialog states plainly that no life-safety feature is behind the paywall,
+ * because that is true and users deserve to know it before they pay.
  */
 @Composable
 fun GuardianProDialog(
     state: com.guardian.safety.billing.ProState,
+    priceLabel: String?,
+    contactsSaved: Int,
+    contactLimit: Int,
     onDismiss: () -> Unit,
     onPurchase: (() -> Unit)?,
     onRestore: () -> Unit,
 ) {
+    val active = state is com.guardian.safety.billing.ProState.Active
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = DarkCard,
-        title = { Text("Guardian Pro", color = TextPrimary, fontWeight = FontWeight.Bold) },
+        title = {
+            Text(
+                if (active) "Guardian Pro — active" else "Guardian Pro",
+                color = TextPrimary,
+                fontWeight = FontWeight.Bold,
+            )
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     when (state) {
                         is com.guardian.safety.billing.ProState.Active -> {
                             val until = state.expiresAt
                             if (until != null) {
-                                "Active until " + java.text.DateFormat.getDateInstance().format(java.util.Date(until)) +
-                                    ". Guardian Pro is handled by RevenueCat and the store; it never touches your safety data."
+                                "Active until " +
+                                    java.text.DateFormat.getDateInstance().format(java.util.Date(until)) + "."
                             } else {
-                                "Active. Guardian Pro is handled by RevenueCat and the store; it never touches your safety data."
+                                "Active. Thank you for supporting Guardian."
                             }
                         }
                         is com.guardian.safety.billing.ProState.NotConfigured ->
                             "This build has no store configuration, so Guardian Pro cannot be purchased here. " +
-                                "Every safety feature works without it."
+                                "Every safety feature still works."
                         is com.guardian.safety.billing.ProState.Error ->
-                            state.message + " Nothing has been charged. Every safety feature still works."
+                            state.message + " Nothing has been charged."
                         is com.guardian.safety.billing.ProState.Inactive ->
-                            "Guardian Pro supports development and unlocks nothing that is needed in an emergency: " +
-                                "SOS, contacts, location alerts and evidence all stay free."
+                            "Guardian Pro raises the limits below. It does not unlock anything you need in an emergency."
                         com.guardian.safety.billing.ProState.Unknown -> "Checking your subscription..."
                     },
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onRestore) { Text("Restore purchases", color = AccentPurple) }
-                    if (state !is com.guardian.safety.billing.ProState.NotConfigured &&
-                        state !is com.guardian.safety.billing.ProState.Active
+
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.2f))
+
+                // What Pro actually changes. Sourced from ProFeatures so the copy
+                // can never drift away from the limits the code enforces.
+                com.guardian.safety.billing.ProFeatures.benefits.forEach { benefit ->
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top,
                     ) {
-                        if (onPurchase != null) {
-                            TextButton(onClick = onPurchase) { Text("Subscribe", color = SuccessGreen) }
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = null,
+                            tint = SuccessGreen,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            benefit,
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
+                }
+
+                Text(
+                    "You are using $contactsSaved of $contactLimit trusted contacts.",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.2f))
+
+                Text(
+                    com.guardian.safety.billing.ProFeatures.FREE_FOREVER_NOTICE,
+                    color = SuccessGreen,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
+                // Price and renewal terms must be visible before the purchase
+                // button is pressed. If no offering loaded we say so rather than
+                // guessing a number.
+                if (!active && state !is com.guardian.safety.billing.ProState.NotConfigured) {
+                    Text(
+                        if (priceLabel != null) {
+                            "$priceLabel per month. Renews automatically until cancelled. " +
+                                "Cancel any time in Google Play; your plan runs to the end of the paid period."
+                        } else {
+                            "Loading the current price from the store..."
+                        },
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close", color = TextSecondary) } },
+        confirmButton = {
+            if (!active && state !is com.guardian.safety.billing.ProState.NotConfigured && onPurchase != null) {
+                TextButton(onClick = onPurchase, enabled = priceLabel != null) {
+                    Text(
+                        if (priceLabel != null) "Subscribe $priceLabel" else "Subscribe",
+                        color = SuccessGreen,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            } else {
+                TextButton(onClick = onDismiss) { Text("Close", color = TextSecondary) }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onRestore) { Text("Restore", color = AccentPurple) }
+                if (!active && state !is com.guardian.safety.billing.ProState.NotConfigured) {
+                    TextButton(onClick = onDismiss) { Text("Close", color = TextSecondary) }
+                }
+            }
+        },
     )
 }
